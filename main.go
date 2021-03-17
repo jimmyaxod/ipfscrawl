@@ -29,7 +29,7 @@ func main() {
 		logging.SetAllLoggers(lvl)
 	*/
 
-	num_crawlers := 128
+	num_crawlers := 1
 	for cr := 0; cr < num_crawlers; cr++ {
 
 		newcon := NewNetworkConn(cr)
@@ -47,14 +47,11 @@ func main() {
 				// Do a lookup...
 				ctx, _ := context.WithTimeout(context.TODO(), 4*time.Second)
 				key := uuid.New().String()
-				ch, err := con.DHT.GetClosestPeers(ctx, key)
-				if err != nil {
-					fmt.Printf("Hmm some error... %v\n", err)
-				}
+				ch, _ := con.DHT.GetClosestPeers(ctx, key)
 
 				go func() {
 					for d := range ch {
-						fmt.Printf("Walk result %v\n", d)
+						//	fmt.Printf("Walk result %v\n", d)
 
 						// Look them up...
 						ai, err := con.DHT.FindPeer(ctx, d)

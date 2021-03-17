@@ -53,7 +53,7 @@ func NewNetworkConn(cr int) NetworkConn {
 		panic(err)
 	}
 
-	fmt.Printf("Created private key %s\n", priv)
+	fmt.Printf("Created private key\n")
 
 	// Create a new host...
 	networkConn.Host, err = libp2p.New(ctx,
@@ -77,9 +77,13 @@ func NewNetworkConn(cr int) NetworkConn {
 
 	fmt.Printf("Using bootstrap servers %v\n", addrs)
 
+	// Create a new datastore...
+	datastore := NewDatastore()
+
 	// Now create a kad dht
 	networkConn.DHT, err = dht.New(ctx, networkConn.Host,
 		dht.Mode(dht.ModeServer),
+		dht.Datastore(datastore),
 		dht.Concurrency(10),
 		dht.BootstrapPeers(addrs...),
 		dht.RoutingTableRefreshPeriod(10*time.Second),

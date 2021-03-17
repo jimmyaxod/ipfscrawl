@@ -4,7 +4,6 @@ package main
  * outputdata is a very simple logfile outputter to keep the crawler fast.
  *
  * TODO: Batched output
- * TODO: Create new files each hour
  *
  */
 
