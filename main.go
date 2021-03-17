@@ -11,25 +11,15 @@ import (
 
 func main() {
 
-	logPeers, err := NewOutputdata("peers.log")
-	if err != nil {
-		panic(err)
-	}
+	period := int64(60) // Every minute
 
-	logPeerinfo, err := NewOutputdata("peerinfo.log")
-	if err != nil {
-		panic(err)
-	}
+	logPeers := NewOutputdata("peer_addrs", period)
 
-	logPeeragents, err := NewOutputdata("peeragents.log")
-	if err != nil {
-		panic(err)
-	}
+	logPeerinfo := NewOutputdata("peer_protocols", period)
 
-	logPeerids, err := NewOutputdata("peerids.log")
-	if err != nil {
-		panic(err)
-	}
+	logPeeragents := NewOutputdata("peer_agents", period)
+
+	logPeerids := NewOutputdata("peer_ids", period)
 
 	/*
 		lvl, err := logging.LevelFromString("debug")
