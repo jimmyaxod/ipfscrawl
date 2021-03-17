@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	proto "github.com/gogo/protobuf/proto"
+	cid "github.com/ipfs/go-cid"
 	datastore "github.com/ipfs/go-datastore"
 	datastore_query "github.com/ipfs/go-datastore/query"
 	pb "github.com/libp2p/go-libp2p-record/pb"
@@ -92,9 +93,22 @@ func (ed *EasyDatastore) GetSize(key datastore.Key) (int, error) {
 func (ed *EasyDatastore) Query(query datastore_query.Query) (datastore_query.Results, error) {
 	fmt.Printf("Call to Query(%v)\n", query)
 
-	s := fmt.Sprintf("%s", query.Prefix)
-	ed.logqueries.WriteData(s)
+	// Get the CID out of the query...
+	var cids string
+	fmt.Sscanf(query.Prefix, "/providers/%s", &cids)
 
+	fmt.Printf("CID is %s\n", cids)
+
+	cid, err := cid.Decode(cids)
+	if err == nil {
+		mh := cid.Hash()
+
+		s := fmt.Sprintf("%s,%d,%d,%d,%d,%s", query.Prefix,
+			cid.Prefix().Codec, cid.Prefix().Version, cid.Prefix().MhType, cid.Prefix().MhLength, mh.HexString())
+		ed.logqueries.WriteData(s)
+	} else {
+		fmt.Printf("ERROR %v\n", err)
+	}
 	res, err := ed.datastore.Query(query)
 	return res, err
 }

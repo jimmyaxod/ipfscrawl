@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+//	logging "github.com/ipfs/go-log"
 	mh "github.com/multiformats/go-multihash"
 )
 
@@ -20,15 +21,13 @@ func main() {
 	logPeeragents := NewOutputdata("peer_agents", period)
 
 	logPeerids := NewOutputdata("peer_ids", period)
-
-	/*
-		lvl, err := logging.LevelFromString("debug")
-		if err != nil {
-			panic(err)
-		}
-		logging.SetAllLoggers(lvl)
-	*/
-
+/*
+	lvl, err := logging.LevelFromString("debug")
+	if err != nil {
+		panic(err)
+	}
+	logging.SetAllLoggers(lvl)
+*/
 	num_crawlers := 1
 	for cr := 0; cr < num_crawlers; cr++ {
 
