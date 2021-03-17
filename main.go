@@ -5,93 +5,84 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-//	logging "github.com/ipfs/go-log"
-	mh "github.com/multiformats/go-multihash"
+	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p-core/crypto"
+	"github.com/libp2p/go-libp2p-core/host"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
+	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
+	secio "github.com/libp2p/go-libp2p-secio"
+	libp2ptls "github.com/libp2p/go-libp2p-tls"
 )
 
 func main() {
 
-	period := int64(60) // Every minute
+	ctx := context.TODO()
 
-	logPeers := NewOutputdata("peer_addrs", period)
-
-	logPeerinfo := NewOutputdata("peer_protocols", period)
-
-	logPeeragents := NewOutputdata("peer_agents", period)
-
-	logPeerids := NewOutputdata("peer_ids", period)
-/*
-	lvl, err := logging.LevelFromString("debug")
+	priv, _, err := crypto.GenerateKeyPair(
+		crypto.RSA, // Select your key type. Ed25519 are nice short
+		2048,       // Select key length when possible (i.e. RSA).
+	)
 	if err != nil {
 		panic(err)
 	}
-	logging.SetAllLoggers(lvl)
-*/
-	num_crawlers := 1
-	for cr := 0; cr < num_crawlers; cr++ {
 
-		newcon := NewNetworkConn(cr)
+	fmt.Printf("Created private key\n")
 
-		// Start one up...
-		go func(con NetworkConn) {
-
-			for {
-
-				// Show some info...
-				fmt.Printf("ID=%s peerstore=%d routingTable=%d\n", con.Host.ID(), len(con.Host.Peerstore().Peers()), len(con.DHT.RoutingTable().GetPeerInfos()))
-
-				// Check out some data...
-
-				// Do a lookup...
-				ctx, _ := context.WithTimeout(context.TODO(), 4*time.Second)
-				key := uuid.New().String()
-				ch, _ := con.DHT.GetClosestPeers(ctx, key)
-
-				go func() {
-					for d := range ch {
-						//	fmt.Printf("Walk result %v\n", d)
-
-						// Look them up...
-						ai, err := con.DHT.FindPeer(ctx, d)
-						if err == nil {
-							for _, a := range ai.Addrs {
-								s := fmt.Sprintf("%s,%s", d, a)
-								logPeers.WriteData(s)
-							}
-						}
-						//
-
-						protocols, err := con.Host.Peerstore().GetProtocols(ai.ID)
-						if err == nil {
-							for _, proto := range protocols {
-								s := fmt.Sprintf("%s,%s", ai.ID, proto)
-								logPeerinfo.WriteData(s)
-							}
-						} else {
-							fmt.Printf("Can't get protocols %s %v\n", ai.ID, err)
-						}
-
-						agent, err := con.Host.Peerstore().Get(ai.ID, "AgentVersion")
-						if err == nil {
-							s := fmt.Sprintf("%s,%s", ai.ID, agent)
-							logPeeragents.WriteData(s)
-						}
-
-						decoded, err := mh.Decode([]byte(ai.ID))
-						if err == nil {
-							s := fmt.Sprintf("%s,%s,%d,%x", ai.ID, decoded.Name, decoded.Length, decoded.Digest)
-							logPeerids.WriteData(s)
-						}
-					}
-				}()
-
-				time.Sleep(100 * time.Millisecond)
-			}
-		}(newcon)
+	// Create a new host...
+	myhost, err := libp2p.New(ctx,
+		libp2p.Identity(priv),
+		libp2p.ListenAddrStrings(
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", 7000),      // regular tcp connections
+			fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic", 7000), // a UDP endpoint for the QUIC transport
+		),
+		libp2p.Security(libp2ptls.ID, libp2ptls.New),
+		libp2p.Security(secio.ID, secio.New),
+		libp2p.Transport(libp2pquic.NewTransport),
+		libp2p.DefaultTransports,
+	)
+	if err != nil {
+		panic("Can't create host")
 	}
 
+	fmt.Printf("Created host %v\n", myhost)
+
+	// Create a dht
+
+	hosts := []host.Host{myhost}
+
+	dhtc := NewDHT(hosts)
+
+	addrs := dht.GetDefaultBootstrapPeerAddrInfos()
+	// Put them in the peerstore...
+	for _, addr := range addrs {
+		for _, a := range addr.Addrs {
+			fmt.Printf("Bootstrap %s %s\n", addr.ID, a)
+		}
+		myhost.Peerstore().AddAddrs(addr.ID, addr.Addrs, time.Hour)
+	}
+
+	for _, addr := range addrs {
+		dhtc.Connect(addr.ID)
+	}
+
+	ticker_stats := time.NewTicker(10 * time.Second)
+
+	for {
+		select {
+		case <-ticker_stats.C:
+			dhtc.ShowStats()
+		}
+	}
+
+	/*
+		targetID, err := peer.Decode("QmYHqPxxfrc4hFXUAqcWNtCu6E7BL7v5EitZdk4uUJekg2")
+		if err != nil {
+			fmt.Printf("error %v\n", err)
+		}
+		targetA, err := multiaddr.NewMultiaddr("/ip4/127.0.0.1/udp/9000/quic")
+		host.Peerstore().AddAddr(targetID, targetA, time.Hour)
+		dhtc.Connect(targetID)
+	*/
 	// Now sit and wait...
 
-	time.Sleep(24 * time.Hour)
 }
