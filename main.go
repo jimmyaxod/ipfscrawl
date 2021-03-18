@@ -18,6 +18,9 @@ const (
 	NUM_HOSTS = 32
 )
 
+// Example:
+// https://cloudflare-ipfs.com/ipfs/QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco/wiki/
+
 func main() {
 
 	ctx := context.TODO()

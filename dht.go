@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,21 +38,23 @@ type DHT struct {
 
 	metric_con_outgoing_fail    uint64
 	metric_con_outgoing_success uint64
+	metric_con_outgoing_dupe    uint64
 	metric_con_incoming         uint64
+	metric_written_ping         uint64
+	metric_written_find_node    uint64
+	metric_read_put_value       uint64
+	metric_read_get_value       uint64
+	metric_read_add_provider    uint64
+	metric_read_get_provider    uint64
+	metric_read_find_node       uint64
+	metric_read_ping            uint64
+	metric_peers_found          uint64
 
-	metric_written_ping      uint64
-	metric_written_find_node uint64
-
-	metric_read_put_value    uint64
-	metric_read_get_value    uint64
-	metric_read_add_provider uint64
-	metric_read_get_provider uint64
-	metric_read_find_node    uint64
-	metric_read_ping         uint64
-
-	metric_peers_found uint64
+	mu          sync.Mutex
+	activePeers map[string]bool
 
 	log_peerinfo     Outputdata
+	log_addproviders Outputdata
 	log_getproviders Outputdata
 }
 
@@ -61,7 +64,9 @@ func NewDHT(hosts []host.Host) *DHT {
 		hosts:            hosts,
 		started:          time.Now(),
 		log_peerinfo:     NewOutputdata("peerinfo", 60*60),
+		log_addproviders: NewOutputdata("addproviders", 60*60),
 		log_getproviders: NewOutputdata("getproviders", 60*60),
+		activePeers:      make(map[string]bool),
 	}
 
 	// Set it up to handle incoming streams...
@@ -85,8 +90,12 @@ func (dht *DHT) ShowStats() {
 		}
 	}
 
-	fmt.Printf("DHT uptime=%.2fs cons=%d streams=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), total_connections, total_streams, dht.metric_peers_found)
-	fmt.Printf("Connections out=%d (%d fails) in=%d\n", dht.metric_con_outgoing_success, dht.metric_con_outgoing_fail, dht.metric_con_incoming)
+	dht.mu.Lock()
+	active := len(dht.activePeers)
+	dht.mu.Unlock()
+
+	fmt.Printf("DHT uptime=%.2fs active=%d cons=%d streams=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), active, total_connections, total_streams, dht.metric_peers_found)
+	fmt.Printf("Connections out=%d (%d fails) (%d dupes) in=%d\n", dht.metric_con_outgoing_success, dht.metric_con_outgoing_fail, dht.metric_con_outgoing_dupe, dht.metric_con_incoming)
 	fmt.Printf("Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
 
 	// Stats on incoming messages
@@ -95,14 +104,24 @@ func (dht *DHT) ShowStats() {
 		dht.metric_read_add_provider, dht.metric_read_get_provider,
 		dht.metric_read_find_node, dht.metric_read_ping)
 
-	for i, host := range dht.hosts {
-		fmt.Printf("Host[%d %s] Peerstore=%d\n", i, host.ID(), host.Peerstore().Peers().Len())
-	}
+	//	for i, host := range dht.hosts {
+	//		fmt.Printf("Host[%d %s] Peerstore=%d\n", i, host.ID(), host.Peerstore().Peers().Len())
+	//	}
 	fmt.Println()
 }
 
 // Connect connects to a new peer, and does some stuff
 func (dht *DHT) Connect(id peer.ID) error {
+	// If we already connected to it, don't bother
+	dht.mu.Lock()
+	v, ok := dht.activePeers[string(id)]
+	dht.mu.Unlock()
+
+	if v && ok {
+		atomic.AddUint64(&dht.metric_con_outgoing_dupe, 1)
+		return nil
+	}
+
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
 
@@ -126,13 +145,15 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 
 // Process a peer stream
 func (dht *DHT) ProcessPeerStream(s network.Stream) {
-	//	fmt.Printf("ProcessPeerStream %v\n", s)
+	peerID := string(s.Conn().RemotePeer())
+
+	// Add it in
+	dht.mu.Lock()
+	dht.activePeers[peerID] = true
+	dht.mu.Unlock()
 
 	// Lets only use the connection for so long... 10 minutes?
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
-
-	// Info on the connection
-	//	rPeer := s.Conn().RemotePeer()
 
 	// Setup something to periodically write PING and FIND_NODE
 	go func() {
@@ -191,6 +212,12 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 	go func() {
 		defer cancelFunc()
 
+		defer func() {
+			dht.mu.Lock()
+			delete(dht.activePeers, peerID)
+			dht.mu.Unlock()
+		}()
+
 		r := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
 
 		for {
@@ -216,6 +243,21 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 				atomic.AddUint64(&dht.metric_read_get_value, 1)
 			case 2:
 				atomic.AddUint64(&dht.metric_read_add_provider, 1)
+
+				pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
+
+				// Log it
+				_, cid, err := cid.CidFromBytes(req.GetKey())
+				if err == nil {
+
+					// Log all providers...
+					for _, pi := range pinfos {
+						for _, a := range pi.Addrs {
+							s := fmt.Sprintf("%s,%s,%s,%s", s.Conn().RemotePeer(), cid, pi.ID, a)
+							dht.log_addproviders.WriteData(s)
+						}
+					}
+				}
 			case 3:
 				atomic.AddUint64(&dht.metric_read_get_provider, 1)
 
