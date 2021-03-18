@@ -17,6 +17,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 
 	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
+	mh "github.com/multiformats/go-multihash"
 )
 
 /**
@@ -54,20 +55,26 @@ type DHT struct {
 	mu          sync.Mutex
 	activePeers map[string]bool
 
-	log_peerinfo     Outputdata
-	log_addproviders Outputdata
-	log_getproviders Outputdata
+	log_peerinfo       Outputdata
+	log_addproviders   Outputdata
+	log_getproviders   Outputdata
+	log_peer_protocols Outputdata
+	log_peer_agents    Outputdata
+	log_peer_ids       Outputdata
 }
 
 // NewDHT creates a new DHT ontop of the given host
 func NewDHT(hosts []host.Host) *DHT {
 	dht := &DHT{
-		hosts:            hosts,
-		started:          time.Now(),
-		log_peerinfo:     NewOutputdata("peerinfo", 60*60),
-		log_addproviders: NewOutputdata("addproviders", 60*60),
-		log_getproviders: NewOutputdata("getproviders", 60*60),
-		activePeers:      make(map[string]bool),
+		hosts:              hosts,
+		started:            time.Now(),
+		log_peerinfo:       NewOutputdata("peerinfo", 60*60),
+		log_peer_protocols: NewOutputdata("peerprotocols", 60*60),
+		log_peer_agents:    NewOutputdata("peeragents", 60*60),
+		log_peer_ids:       NewOutputdata("peerids", 60*60),
+		log_addproviders:   NewOutputdata("addproviders", 60*60),
+		log_getproviders:   NewOutputdata("getproviders", 60*60),
+		activePeers:        make(map[string]bool),
 	}
 
 	// Set it up to handle incoming streams...
@@ -115,7 +122,7 @@ func (dht *DHT) ShowStats() {
 func (dht *DHT) Connect(id peer.ID) error {
 	// If we already connected to it, don't bother
 	dht.mu.Lock()
-	v, ok := dht.activePeers[string(id)]
+	v, ok := dht.activePeers[id.Pretty()]
 	dht.mu.Unlock()
 
 	if v && ok {
@@ -295,7 +302,31 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 // Process a peer stream
 func (dht *DHT) ProcessPeerStream(s network.Stream) {
-	peerID := s.Conn().RemotePeer().Pretty()
+	pid := s.Conn().RemotePeer()
+	peerID := pid.Pretty()
+
+	host := dht.hosts[0] // For now, since they all use the same anyways...
+
+	// Find out some info about the peer...
+	protocols, err := host.Peerstore().GetProtocols(pid)
+	if err == nil {
+		for _, proto := range protocols {
+			s := fmt.Sprintf("%s,%s", peerID, proto)
+			dht.log_peer_protocols.WriteData(s)
+		}
+	}
+
+	agent, err := host.Peerstore().Get(pid, "AgentVersion")
+	if err == nil {
+		s := fmt.Sprintf("%s,%s", peerID, agent)
+		dht.log_peer_agents.WriteData(s)
+	}
+
+	decoded, err := mh.Decode([]byte(pid))
+	if err == nil {
+		s := fmt.Sprintf("%s,%s,%d,%x", peerID, decoded.Name, decoded.Length, decoded.Digest)
+		dht.log_peer_ids.WriteData(s)
+	}
 
 	// Add it in
 	dht.mu.Lock()
