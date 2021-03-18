@@ -14,51 +14,56 @@ import (
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
 )
 
+const (
+	NUM_HOSTS = 32
+)
+
 func main() {
 
 	ctx := context.TODO()
 
-	priv, _, err := crypto.GenerateKeyPair(
-		crypto.RSA, // Select your key type. Ed25519 are nice short
-		2048,       // Select key length when possible (i.e. RSA).
-	)
-	if err != nil {
-		panic(err)
+	hosts := make([]host.Host, NUM_HOSTS)
+
+	for i := 0; i < NUM_HOSTS; i++ {
+
+		priv, _, err := crypto.GenerateKeyPair(
+			crypto.RSA, // Select your key type. Ed25519 are nice short
+			2048,       // Select key length when possible (i.e. RSA).
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		// Create a new host...
+		myhost, err := libp2p.New(ctx,
+			libp2p.Identity(priv),
+			libp2p.ListenAddrStrings(
+				fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", 7000+i),      // regular tcp connections
+				fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic", 7000+i), // a UDP endpoint for the QUIC transport
+			),
+			libp2p.Security(libp2ptls.ID, libp2ptls.New),
+			libp2p.Security(secio.ID, secio.New),
+			libp2p.Transport(libp2pquic.NewTransport),
+			libp2p.DefaultTransports,
+		)
+		if err != nil {
+			panic("Can't create host")
+		}
+		hosts[i] = myhost
 	}
 
-	fmt.Printf("Created private key\n")
-
-	// Create a new host...
-	myhost, err := libp2p.New(ctx,
-		libp2p.Identity(priv),
-		libp2p.ListenAddrStrings(
-			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", 7000),      // regular tcp connections
-			fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic", 7000), // a UDP endpoint for the QUIC transport
-		),
-		libp2p.Security(libp2ptls.ID, libp2ptls.New),
-		libp2p.Security(secio.ID, secio.New),
-		libp2p.Transport(libp2pquic.NewTransport),
-		libp2p.DefaultTransports,
-	)
-	if err != nil {
-		panic("Can't create host")
-	}
-
-	fmt.Printf("Created host %v\n", myhost)
-
-	// Create a dht
-
-	hosts := []host.Host{myhost}
-
+	// Create a dht crawler using the above hosts
 	dhtc := NewDHT(hosts)
 
 	addrs := dht.GetDefaultBootstrapPeerAddrInfos()
-	// Put them in the peerstore...
+	// Put them in the peerstores...
 	for _, addr := range addrs {
 		for _, a := range addr.Addrs {
 			fmt.Printf("Bootstrap %s %s\n", addr.ID, a)
 		}
-		myhost.Peerstore().AddAddrs(addr.ID, addr.Addrs, time.Hour)
+		for _, host := range hosts {
+			host.Peerstore().AddAddrs(addr.ID, addr.Addrs, time.Hour)
+		}
 	}
 
 	for _, addr := range addrs {

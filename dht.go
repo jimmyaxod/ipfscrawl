@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
@@ -49,13 +50,18 @@ type DHT struct {
 	metric_read_ping         uint64
 
 	metric_peers_found uint64
+
+	log_peerinfo     Outputdata
+	log_getproviders Outputdata
 }
 
 // NewDHT creates a new DHT ontop of the given host
-func NewDHT(hosts []host.Host) DHT {
-	dht := DHT{
-		hosts:   hosts,
-		started: time.Now(),
+func NewDHT(hosts []host.Host) *DHT {
+	dht := &DHT{
+		hosts:            hosts,
+		started:          time.Now(),
+		log_peerinfo:     NewOutputdata("peerinfo", 60*60),
+		log_getproviders: NewOutputdata("getproviders", 60*60),
 	}
 
 	// Set it up to handle incoming streams...
@@ -67,7 +73,19 @@ func NewDHT(hosts []host.Host) DHT {
 }
 
 func (dht *DHT) ShowStats() {
-	fmt.Printf("DHT uptime=%.2fs total_peers_found=%d\n", time.Since(dht.started).Seconds(), dht.metric_peers_found)
+	// How many connections do we have?
+	total_connections := 0
+	total_streams := 0
+	for _, host := range dht.hosts {
+		cons := host.Network().Conns()
+
+		total_connections += len(cons)
+		for _, con := range cons {
+			total_streams += len(con.GetStreams())
+		}
+	}
+
+	fmt.Printf("DHT uptime=%.2fs cons=%d streams=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), total_connections, total_streams, dht.metric_peers_found)
 	fmt.Printf("Connections out=%d (%d fails) in=%d\n", dht.metric_con_outgoing_success, dht.metric_con_outgoing_fail, dht.metric_con_incoming)
 	fmt.Printf("Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
 
@@ -200,6 +218,13 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 				atomic.AddUint64(&dht.metric_read_add_provider, 1)
 			case 3:
 				atomic.AddUint64(&dht.metric_read_get_provider, 1)
+
+				// Log it
+				_, cid, err := cid.CidFromBytes(req.GetKey())
+				if err == nil {
+					s := fmt.Sprintf("%s,%s", s.Conn().RemotePeer(), cid)
+					dht.log_getproviders.WriteData(s)
+				}
 			case 4:
 				atomic.AddUint64(&dht.metric_read_find_node, 1)
 			case 5:
@@ -213,18 +238,20 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 
 				pid, err := peer.IDFromBytes([]byte(cpeer.Id))
 				if err == nil {
-
-					// For now, we'll add it to all host peerstores...
-					for _, host := range dht.hosts {
-
-						for _, a := range cpeer.Addrs {
-							ad, err := multiaddr.NewMultiaddrBytes(a)
-							if err == nil {
+					for _, a := range cpeer.Addrs {
+						ad, err := multiaddr.NewMultiaddrBytes(a)
+						if err == nil {
+							// For now, we'll add it to all host peerstores...
+							for _, host := range dht.hosts {
 								host.Peerstore().AddAddr(pid, ad, 1*time.Hour)
 							}
-						}
 
+							// fromPeerID, newPeerID, addr
+							s := fmt.Sprintf("%s,%s,%s", s.Conn().RemotePeer(), pid, ad)
+							dht.log_peerinfo.WriteData(s)
+						}
 					}
+
 					atomic.AddUint64(&dht.metric_peers_found, 1)
 
 					// Now lets go to this one...
