@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -143,9 +144,158 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	dht.ProcessPeerStream(s)
 }
 
+func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelFunc, s io.Writer) {
+	defer cancelFunc()
+
+	// Setup reader / writer
+	w := msgio.NewVarintWriter(s)
+
+	ticker_ping := time.NewTicker(10 * time.Second)
+	ticker_find_node := time.NewTicker(10 * time.Second)
+
+	for {
+		select {
+		case <-ticker_ping.C:
+			// Send out a ping
+			msg_ping := pb.Message{
+				Type: pb.Message_PING,
+			}
+
+			data_ping, err := msg_ping.Marshal()
+			if err != nil {
+				return
+			}
+			err = w.WriteMsg(data_ping)
+			if err != nil {
+				return
+			}
+			atomic.AddUint64(&dht.metric_written_ping, 1)
+		case <-ticker_find_node.C:
+			// Send out a find_node
+
+			key := make([]byte, 16)
+			rand.Read(key)
+
+			msg := pb.Message{
+				Type: pb.Message_FIND_NODE,
+				Key:  key,
+			}
+
+			data, err := msg.Marshal()
+			if err != nil {
+				return
+			}
+			err = w.WriteMsg(data)
+			if err != nil {
+				return
+			}
+			atomic.AddUint64(&dht.metric_written_find_node, 1)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// doReading reads msgs from stream and processes...
+func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s io.Reader, peerID string) {
+	defer cancelFunc()
+
+	// When we're done reading, we'll remove from activePeers...
+	defer func() {
+		dht.mu.Lock()
+		delete(dht.activePeers, peerID)
+		dht.mu.Unlock()
+	}()
+
+	r := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
+
+	for {
+		var req pb.Message
+		msgbytes, err := r.ReadMsg()
+		if err != nil {
+			return
+		}
+
+		err = req.Unmarshal(msgbytes)
+		r.ReleaseMsg(msgbytes)
+		if err != nil {
+			return
+		}
+
+		// Incoming message!
+		//			fmt.Printf("Msg peer=%s type=%s key=%s\n", rPeer, req.GetType(), req.GetKey())
+
+		switch req.GetType() {
+		case 0:
+			atomic.AddUint64(&dht.metric_read_put_value, 1)
+		case 1:
+			atomic.AddUint64(&dht.metric_read_get_value, 1)
+		case 2:
+			atomic.AddUint64(&dht.metric_read_add_provider, 1)
+
+			pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
+
+			// Log it
+			_, cid, err := cid.CidFromBytes(req.GetKey())
+			if err == nil {
+
+				// Log all providers...
+				for _, pi := range pinfos {
+					for _, a := range pi.Addrs {
+						s := fmt.Sprintf("%s,%s,%s,%s", peerID, cid, pi.ID, a)
+						dht.log_addproviders.WriteData(s)
+					}
+				}
+			}
+		case 3:
+			atomic.AddUint64(&dht.metric_read_get_provider, 1)
+
+			// Log it
+			_, cid, err := cid.CidFromBytes(req.GetKey())
+			if err == nil {
+				s := fmt.Sprintf("%s,%s", peerID, cid)
+				dht.log_getproviders.WriteData(s)
+			}
+		case 4:
+			atomic.AddUint64(&dht.metric_read_find_node, 1)
+		case 5:
+			atomic.AddUint64(&dht.metric_read_ping, 1)
+		}
+
+		// Check out the FIND_NODE on that!
+		for _, cpeer := range req.CloserPeers {
+
+			// Carry on the crawl...
+
+			pid, err := peer.IDFromBytes([]byte(cpeer.Id))
+			if err == nil {
+				for _, a := range cpeer.Addrs {
+					ad, err := multiaddr.NewMultiaddrBytes(a)
+					if err == nil {
+						// For now, we'll add it to all host peerstores...
+						for _, host := range dht.hosts {
+							host.Peerstore().AddAddr(pid, ad, 1*time.Hour)
+						}
+
+						// fromPeerID, newPeerID, addr
+						s := fmt.Sprintf("%s,%s,%s", peerID, pid, ad)
+						dht.log_peerinfo.WriteData(s)
+					}
+				}
+
+				atomic.AddUint64(&dht.metric_peers_found, 1)
+
+				// Now lets go to this one...
+				// Aint no way I'm waiting though
+				go dht.Connect(pid)
+			}
+		}
+	}
+}
+
 // Process a peer stream
 func (dht *DHT) ProcessPeerStream(s network.Stream) {
-	peerID := string(s.Conn().RemotePeer())
+	peerID := s.Conn().RemotePeer().Pretty()
 
 	// Add it in
 	dht.mu.Lock()
@@ -155,152 +305,9 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 	// Lets only use the connection for so long... 10 minutes?
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
 
-	// Setup something to periodically write PING and FIND_NODE
-	go func() {
-		defer cancelFunc()
+	// Start something up to periodically FIND_NODE and PING
+	go dht.doPeriodicWrites(ctx, cancelFunc, s)
 
-		// Setup reader / writer
-		w := msgio.NewVarintWriter(s)
-
-		ticker_ping := time.NewTicker(10 * time.Second)
-		ticker_find_node := time.NewTicker(10 * time.Second)
-
-		for {
-			select {
-			case <-ticker_ping.C:
-				// Send out a ping
-				msg_ping := pb.Message{
-					Type: pb.Message_PING,
-				}
-
-				data_ping, err := msg_ping.Marshal()
-				if err != nil {
-					return
-				}
-				err = w.WriteMsg(data_ping)
-				if err != nil {
-					return
-				}
-				atomic.AddUint64(&dht.metric_written_ping, 1)
-			case <-ticker_find_node.C:
-				// Send out a find_node
-
-				key := make([]byte, 16)
-				rand.Read(key)
-
-				msg := pb.Message{
-					Type: pb.Message_FIND_NODE,
-					Key:  key,
-				}
-
-				data, err := msg.Marshal()
-				if err != nil {
-					return
-				}
-				err = w.WriteMsg(data)
-				if err != nil {
-					return
-				}
-				atomic.AddUint64(&dht.metric_written_find_node, 1)
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	// Reader...
-	go func() {
-		defer cancelFunc()
-
-		defer func() {
-			dht.mu.Lock()
-			delete(dht.activePeers, peerID)
-			dht.mu.Unlock()
-		}()
-
-		r := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
-
-		for {
-			var req pb.Message
-			msgbytes, err := r.ReadMsg()
-			if err != nil {
-				return
-			}
-
-			err = req.Unmarshal(msgbytes)
-			r.ReleaseMsg(msgbytes)
-			if err != nil {
-				return
-			}
-
-			// Incoming message!
-			//			fmt.Printf("Msg peer=%s type=%s key=%s\n", rPeer, req.GetType(), req.GetKey())
-
-			switch req.GetType() {
-			case 0:
-				atomic.AddUint64(&dht.metric_read_put_value, 1)
-			case 1:
-				atomic.AddUint64(&dht.metric_read_get_value, 1)
-			case 2:
-				atomic.AddUint64(&dht.metric_read_add_provider, 1)
-
-				pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
-
-				// Log it
-				_, cid, err := cid.CidFromBytes(req.GetKey())
-				if err == nil {
-
-					// Log all providers...
-					for _, pi := range pinfos {
-						for _, a := range pi.Addrs {
-							s := fmt.Sprintf("%s,%s,%s,%s", s.Conn().RemotePeer(), cid, pi.ID, a)
-							dht.log_addproviders.WriteData(s)
-						}
-					}
-				}
-			case 3:
-				atomic.AddUint64(&dht.metric_read_get_provider, 1)
-
-				// Log it
-				_, cid, err := cid.CidFromBytes(req.GetKey())
-				if err == nil {
-					s := fmt.Sprintf("%s,%s", s.Conn().RemotePeer(), cid)
-					dht.log_getproviders.WriteData(s)
-				}
-			case 4:
-				atomic.AddUint64(&dht.metric_read_find_node, 1)
-			case 5:
-				atomic.AddUint64(&dht.metric_read_ping, 1)
-			}
-
-			// Check out the FIND_NODE on that!
-			for _, cpeer := range req.CloserPeers {
-
-				// Carry on the crawl...
-
-				pid, err := peer.IDFromBytes([]byte(cpeer.Id))
-				if err == nil {
-					for _, a := range cpeer.Addrs {
-						ad, err := multiaddr.NewMultiaddrBytes(a)
-						if err == nil {
-							// For now, we'll add it to all host peerstores...
-							for _, host := range dht.hosts {
-								host.Peerstore().AddAddr(pid, ad, 1*time.Hour)
-							}
-
-							// fromPeerID, newPeerID, addr
-							s := fmt.Sprintf("%s,%s,%s", s.Conn().RemotePeer(), pid, ad)
-							dht.log_peerinfo.WriteData(s)
-						}
-					}
-
-					atomic.AddUint64(&dht.metric_peers_found, 1)
-
-					// Now lets go to this one...
-					// Aint no way I'm waiting though
-					go dht.Connect(pid)
-				}
-			}
-		}
-	}()
+	// Start something to read messages
+	go dht.doReading(ctx, cancelFunc, s, peerID)
 }
