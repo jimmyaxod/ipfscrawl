@@ -328,7 +328,7 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 		dht.log_peer_ids.WriteData(s)
 	}
 
-	// Add it in
+	// Add it in to activePeers, so we don't have dupe connections
 	dht.mu.Lock()
 	dht.activePeers[peerID] = true
 	dht.mu.Unlock()
