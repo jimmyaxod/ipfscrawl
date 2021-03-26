@@ -9,13 +9,14 @@ import (
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
 	secio "github.com/libp2p/go-libp2p-secio"
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
 )
 
 const (
-	NUM_HOSTS = 64
+	NUM_HOSTS = 16
 )
 
 // Example IPFS link:
@@ -26,6 +27,8 @@ func main() {
 	ctx := context.TODO()
 
 	hosts := make([]host.Host, NUM_HOSTS)
+
+	peerstore := pstoremem.NewPeerstore()
 
 	for i := 0; i < NUM_HOSTS; i++ {
 
@@ -47,6 +50,7 @@ func main() {
 			libp2p.Security(libp2ptls.ID, libp2ptls.New),
 			libp2p.Security(secio.ID, secio.New),
 			libp2p.Transport(libp2pquic.NewTransport),
+			libp2p.Peerstore(peerstore),
 			libp2p.DefaultTransports,
 		)
 		if err != nil {
@@ -56,7 +60,7 @@ func main() {
 	}
 
 	// Create a dht crawler using the above hosts
-	dhtc := NewDHT(hosts)
+	dhtc := NewDHT(peerstore, hosts)
 
 	/*
 		targetID, err := peer.Decode("QmYHqPxxfrc4hFXUAqcWNtCu6E7BL7v5EitZdk4uUJekg2")

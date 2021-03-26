@@ -17,6 +17,8 @@ import (
 	"github.com/libp2p/go-msgio"
 	"github.com/multiformats/go-multiaddr"
 
+	peerstore "github.com/libp2p/go-libp2p-peerstore"
+
 	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	mh "github.com/multiformats/go-multihash"
 
@@ -37,7 +39,8 @@ const (
 )
 
 type DHT struct {
-	hosts []host.Host
+	peerstore peerstore.Peerstore
+	hosts     []host.Host
 
 	started time.Time
 
@@ -55,10 +58,6 @@ type DHT struct {
 	metric_read_ping            uint64
 	metric_peers_found          uint64
 
-	mu             sync.Mutex
-	activePeers    map[string]bool
-	numActivePeers int64
-
 	log_peerinfo       Outputdata
 	log_addproviders   Outputdata
 	log_getproviders   Outputdata
@@ -68,13 +67,18 @@ type DHT struct {
 	log_peer_protocols Outputdata
 	log_peer_agents    Outputdata
 	log_peer_ids       Outputdata
+
+	mu             sync.Mutex
+	activePeers    map[string]bool
+	numActivePeers int64
 }
 
-// NewDHT creates a new DHT ontop of the given hosts
-func NewDHT(hosts []host.Host) *DHT {
+// NewDHT creates a new DHT on top of the given hosts
+func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
+		peerstore:          peerstore,
 		hosts:              hosts,
 		started:            time.Now(),
 		log_peerinfo:       NewOutputdata("peerinfo", output_file_period),
@@ -102,10 +106,9 @@ func (dht *DHT) ShowStats() {
 	// How many connections do we have?, how many streams?
 	total_connections := 0
 	total_streams := 0
-	total_peerstore := 0
-	for _, host := range dht.hosts {
-		total_peerstore += host.Peerstore().Peers().Len()
+	total_peerstore := dht.peerstore.Peers().Len()
 
+	for _, host := range dht.hosts {
 		cons := host.Network().Conns()
 
 		total_connections += len(cons)
@@ -132,7 +135,7 @@ func (dht *DHT) ShowStats() {
 
 // Connect connects to a new peer, and starts an eventloop for it
 func (dht *DHT) Connect(id peer.ID) error {
-	// If we are already connected to it, don't bother
+	// If we are already connected to the peerID, don't bother
 	dht.mu.Lock()
 	v, ok := dht.activePeers[id.Pretty()]
 	dht.mu.Unlock()
@@ -167,7 +170,7 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 
 	w := msgio.NewVarintWriter(s)
 
-	ticker_ping := time.NewTicker(10 * time.Second)
+	ticker_ping := time.NewTicker(30 * time.Second)
 	ticker_find_node := time.NewTicker(10 * time.Second)
 
 	for {
@@ -326,11 +329,9 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 			if err == nil {
 				for _, a := range cpeer.Addrs {
 					ad, err := multiaddr.NewMultiaddrBytes(a)
-					if err == nil {
-						// For now, we'll add it to all host peerstores...
-						for _, host := range dht.hosts {
-							host.Peerstore().AddAddr(pid, ad, 1*time.Hour)
-						}
+					if err == nil && isConnectable(ad) {
+
+						dht.peerstore.AddAddr(pid, ad, 12*time.Hour)
 
 						// fromPeerID, newPeerID, addr
 						s := fmt.Sprintf("%s,%s,%s", peerID, pid, ad)
@@ -346,6 +347,39 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 			}
 		}
 	}
+}
+
+// Filter out some common unconnectable addresses...
+func isConnectable(a multiaddr.Multiaddr) bool {
+
+	// Loopbacks
+	if strings.HasPrefix(a.String(), "/ip4/127.0.0.1/") ||
+		strings.HasPrefix(a.String(), "/ip6/::1/") {
+		return false
+	}
+
+	// Internal ip4 ranges
+	if strings.HasPrefix(a.String(), "/ip4/192.168.") ||
+		strings.HasPrefix(a.String(), "/ip4/10.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.16.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.17.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.18.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.19.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.20.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.21.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.22.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.23.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.24.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.25.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.26.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.27.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.28.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.29.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.30.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.31.") {
+		return false
+	}
+	return true
 }
 
 // Process a peer stream
