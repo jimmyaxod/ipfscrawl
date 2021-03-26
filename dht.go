@@ -101,7 +101,10 @@ func (dht *DHT) ShowStats() {
 	// How many connections do we have?, how many streams?
 	total_connections := 0
 	total_streams := 0
+	total_peerstore := 0
 	for _, host := range dht.hosts {
+		total_peerstore += host.Peerstore().Peers().Len()
+
 		cons := host.Network().Conns()
 
 		total_connections += len(cons)
@@ -114,9 +117,10 @@ func (dht *DHT) ShowStats() {
 	active := len(dht.activePeers)
 	dht.mu.Unlock()
 
-	fmt.Printf("DHT uptime=%.2fs active=%d cons=%d streams=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), active, total_connections, total_streams, dht.metric_peers_found)
-	fmt.Printf("Connections out=%d (%d fails) (%d dupes) in=%d\n", dht.metric_con_outgoing_success, dht.metric_con_outgoing_fail, dht.metric_con_outgoing_dupe, dht.metric_con_incoming)
-	fmt.Printf("Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
+	fmt.Printf("DHT uptime=%.2fs active=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), active, dht.metric_peers_found)
+	fmt.Printf("Current Hosts cons=%d streams=%d peerstore=%d\n", total_connections, total_streams, total_peerstore)
+	fmt.Printf("Total Connections out=%d (%d fails) (%d dupes) in=%d\n", dht.metric_con_outgoing_success, dht.metric_con_outgoing_fail, dht.metric_con_outgoing_dupe, dht.metric_con_incoming)
+	fmt.Printf("Total Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
 
 	// Stats on incoming messages
 	fmt.Printf("Reads put=%d get=%d addprov=%d getprov=%d find_node=%d ping=%d\n",
@@ -211,8 +215,11 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 }
 
 // doReading reads msgs from stream and processes...
-func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s io.Reader, peerID string) {
+func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, peerID string) {
 	defer cancelFunc()
+
+	// Close the stream in the reader only...
+	defer s.Close()
 
 	// When we're done reading, we'll remove from activePeers...
 	defer func() {
@@ -244,6 +251,8 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 			s := fmt.Sprintf("%s,%x,%x,%x,%s", peerID, req.GetKey(), rec.Key, rec.Value, rec.TimeReceived)
 			dht.log_put.WriteData(s)
+
+			// TODO: /pk/ - maps Hash(pubkey) to pubkey
 
 			// If it's ipns...
 			if strings.HasPrefix(string(rec.Key), "/ipns/") {
@@ -344,6 +353,17 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
 	peerID := pid.Pretty()
 
+	// Add it in to activePeers, so we don't have dupe connections
+	dht.mu.Lock()
+	v, ok := dht.activePeers[peerID]
+	if v && ok {
+		dht.mu.Unlock()
+		s.Close()
+		return
+	}
+	dht.activePeers[peerID] = true
+	dht.mu.Unlock()
+
 	host := dht.hosts[0] // For now, since they all use the same anyways...
 
 	// Find out some info about the peer...
@@ -366,11 +386,6 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 		s := fmt.Sprintf("%s,%s,%d,%x", peerID, decoded.Name, decoded.Length, decoded.Digest)
 		dht.log_peer_ids.WriteData(s)
 	}
-
-	// Add it in to activePeers, so we don't have dupe connections
-	dht.mu.Lock()
-	dht.activePeers[peerID] = true
-	dht.mu.Unlock()
 
 	// Lets only use the connection for so long... 10 minutes?
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
