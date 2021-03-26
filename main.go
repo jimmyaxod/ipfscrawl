@@ -9,6 +9,7 @@ import (
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	noise "github.com/libp2p/go-libp2p-noise"
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
 	secio "github.com/libp2p/go-libp2p-secio"
@@ -22,8 +23,10 @@ const (
 	NUM_HOSTS = 16
 )
 
-// Example IPFS link:
-// https://cloudflare-ipfs.com/ipfs/QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco/wiki/
+// Example:
+
+// https://cloudflare-ipfs.com/ipns/12D3KooWSPahV81xHimuUKrwNnonYgVrDMs1JtqmT3B12zsY5F6f
+// https://cloudflare-ipfs.com/ipfs/QmTenMnimYgzfX96qdu1kHka1S68v9PxXi8pgHd29tJywT
 
 func main() {
 
@@ -53,6 +56,7 @@ func main() {
 				fmt.Sprintf("/ip6/::/udp/%d/quic", 7000+i),      // a UDP endpoint for the QUIC transport
 			),
 			libp2p.Security(libp2ptls.ID, libp2ptls.New),
+			libp2p.Security(noise.ID, noise.New),
 			libp2p.Security(secio.ID, secio.New),
 			libp2p.Transport(libp2pquic.NewTransport),
 			libp2p.Peerstore(peerstore),

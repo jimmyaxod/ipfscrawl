@@ -64,6 +64,7 @@ type DHT struct {
 	log_put            Outputdata
 	log_get            Outputdata
 	log_put_ipns       Outputdata
+	log_get_ipns       Outputdata
 	log_peer_protocols Outputdata
 	log_peer_agents    Outputdata
 	log_peer_ids       Outputdata
@@ -90,6 +91,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		log_put:            NewOutputdata("put", output_file_period),
 		log_get:            NewOutputdata("get", output_file_period),
 		log_put_ipns:       NewOutputdata("put_ipns", output_file_period),
+		log_get_ipns:       NewOutputdata("get_ipns", output_file_period),
 		activePeers:        make(map[string]bool),
 	}
 
@@ -291,6 +293,15 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 			s := fmt.Sprintf("%s,%x", peerID, req.GetKey())
 			dht.log_get.WriteData(s)
 
+			if strings.HasPrefix(string(req.GetKey()), "/ipns/") {
+				// Extract the PID...
+				pidbytes := req.GetKey()[6:]
+				pid, err := peer.IDFromBytes(pidbytes)
+				if err == nil {
+					s := fmt.Sprintf("%s,%s", peerID, pid.Pretty())
+					dht.log_get_ipns.WriteData(s)
+				}
+			}
 		case 2:
 			atomic.AddUint64(&dht.metric_read_add_provider, 1)
 
