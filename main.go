@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	NUM_HOSTS = 32
+	NUM_HOSTS = 64
 )
 
-// Example:
+// Example IPFS link:
 // https://cloudflare-ipfs.com/ipfs/QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco/wiki/
 
 func main() {
@@ -29,10 +29,8 @@ func main() {
 
 	for i := 0; i < NUM_HOSTS; i++ {
 
-		priv, _, err := crypto.GenerateKeyPair(
-			crypto.RSA, // Select your key type. Ed25519 are nice short
-			2048,       // Select key length when possible (i.e. RSA).
-		)
+		// Create some keys
+		priv, _, err := crypto.GenerateKeyPair(crypto.RSA, 2048)
 		if err != nil {
 			panic(err)
 		}
@@ -58,6 +56,16 @@ func main() {
 	// Create a dht crawler using the above hosts
 	dhtc := NewDHT(hosts)
 
+	/*
+		targetID, err := peer.Decode("QmYHqPxxfrc4hFXUAqcWNtCu6E7BL7v5EitZdk4uUJekg2")
+		if err != nil {
+			fmt.Printf("error %v\n", err)
+		}
+		targetA, err := multiaddr.NewMultiaddr("/ip4/127.0.0.1/udp/9000/quic")
+		host.Peerstore().AddAddr(targetID, targetA, time.Hour)
+		dhtc.Connect(targetID)
+	*/
+
 	addrs := dht.GetDefaultBootstrapPeerAddrInfos()
 	// Put them in the peerstores...
 	for _, addr := range addrs {
@@ -81,16 +89,5 @@ func main() {
 			dhtc.ShowStats()
 		}
 	}
-
-	/*
-		targetID, err := peer.Decode("QmYHqPxxfrc4hFXUAqcWNtCu6E7BL7v5EitZdk4uUJekg2")
-		if err != nil {
-			fmt.Printf("error %v\n", err)
-		}
-		targetA, err := multiaddr.NewMultiaddr("/ip4/127.0.0.1/udp/9000/quic")
-		host.Peerstore().AddAddr(targetID, targetA, time.Hour)
-		dhtc.Connect(targetID)
-	*/
-	// Now sit and wait...
 
 }

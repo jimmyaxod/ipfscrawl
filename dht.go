@@ -63,21 +63,23 @@ type DHT struct {
 	log_peer_ids       Outputdata
 }
 
-// NewDHT creates a new DHT ontop of the given host
+// NewDHT creates a new DHT ontop of the given hosts
 func NewDHT(hosts []host.Host) *DHT {
+	output_file_period := int64(60 * 60)
+
 	dht := &DHT{
 		hosts:              hosts,
 		started:            time.Now(),
-		log_peerinfo:       NewOutputdata("peerinfo", 60*60),
-		log_peer_protocols: NewOutputdata("peerprotocols", 60*60),
-		log_peer_agents:    NewOutputdata("peeragents", 60*60),
-		log_peer_ids:       NewOutputdata("peerids", 60*60),
-		log_addproviders:   NewOutputdata("addproviders", 60*60),
-		log_getproviders:   NewOutputdata("getproviders", 60*60),
+		log_peerinfo:       NewOutputdata("peerinfo", output_file_period),
+		log_peer_protocols: NewOutputdata("peerprotocols", output_file_period),
+		log_peer_agents:    NewOutputdata("peeragents", output_file_period),
+		log_peer_ids:       NewOutputdata("peerids", output_file_period),
+		log_addproviders:   NewOutputdata("addproviders", output_file_period),
+		log_getproviders:   NewOutputdata("getproviders", output_file_period),
 		activePeers:        make(map[string]bool),
 	}
 
-	// Set it up to handle incoming streams...
+	// Set it up to handle incoming streams of the correct protocol
 	for _, host := range hosts {
 		host.SetStreamHandler(proto, dht.handleNewStream)
 	}
@@ -85,8 +87,9 @@ func NewDHT(hosts []host.Host) *DHT {
 	return dht
 }
 
+// ShowStats - print out some stats about our crawl
 func (dht *DHT) ShowStats() {
-	// How many connections do we have?
+	// How many connections do we have?, how many streams?
 	total_connections := 0
 	total_streams := 0
 	for _, host := range dht.hosts {
@@ -112,15 +115,12 @@ func (dht *DHT) ShowStats() {
 		dht.metric_read_add_provider, dht.metric_read_get_provider,
 		dht.metric_read_find_node, dht.metric_read_ping)
 
-	//	for i, host := range dht.hosts {
-	//		fmt.Printf("Host[%d %s] Peerstore=%d\n", i, host.ID(), host.Peerstore().Peers().Len())
-	//	}
 	fmt.Println()
 }
 
-// Connect connects to a new peer, and does some stuff
+// Connect connects to a new peer, and starts an eventloop for it
 func (dht *DHT) Connect(id peer.ID) error {
-	// If we already connected to it, don't bother
+	// If we are already connected to it, don't bother
 	dht.mu.Lock()
 	v, ok := dht.activePeers[id.Pretty()]
 	dht.mu.Unlock()
@@ -145,16 +145,14 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 // handleNewStream handles incoming streams
 func (dht *DHT) handleNewStream(s network.Stream) {
-	//	fmt.Printf("handleNewStream %v\n", s)
 	atomic.AddUint64(&dht.metric_con_incoming, 1)
-
 	dht.ProcessPeerStream(s)
 }
 
+// doPeriodicWrites handles sending periodic FIND_NODE and PING
 func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelFunc, s io.Writer) {
 	defer cancelFunc()
 
-	// Setup reader / writer
 	w := msgio.NewVarintWriter(s)
 
 	ticker_ping := time.NewTicker(10 * time.Second)
@@ -178,7 +176,7 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 			}
 			atomic.AddUint64(&dht.metric_written_ping, 1)
 		case <-ticker_find_node.C:
-			// Send out a find_node
+			// Send out a find_node for a random key
 
 			key := make([]byte, 16)
 			rand.Read(key)
@@ -229,9 +227,6 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 			return
 		}
 
-		// Incoming message!
-		//			fmt.Printf("Msg peer=%s type=%s key=%s\n", rPeer, req.GetType(), req.GetKey())
-
 		switch req.GetType() {
 		case 0:
 			atomic.AddUint64(&dht.metric_read_put_value, 1)
@@ -242,7 +237,6 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 			pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
 
-			// Log it
 			_, cid, err := cid.CidFromBytes(req.GetKey())
 			if err == nil {
 
@@ -257,7 +251,6 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 		case 3:
 			atomic.AddUint64(&dht.metric_read_get_provider, 1)
 
-			// Log it
 			_, cid, err := cid.CidFromBytes(req.GetKey())
 			if err == nil {
 				s := fmt.Sprintf("%s,%s", peerID, cid)
@@ -271,8 +264,6 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 		// Check out the FIND_NODE on that!
 		for _, cpeer := range req.CloserPeers {
-
-			// Carry on the crawl...
 
 			pid, err := peer.IDFromBytes([]byte(cpeer.Id))
 			if err == nil {
