@@ -40,7 +40,9 @@ func main() {
 			libp2p.Identity(priv),
 			libp2p.ListenAddrStrings(
 				fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", 7000+i),      // regular tcp connections
+				fmt.Sprintf("/ip6/::/tcp/%d", 7000+i),           // regular tcp connections
 				fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic", 7000+i), // a UDP endpoint for the QUIC transport
+				fmt.Sprintf("/ip6/::/udp/%d/quic", 7000+i),      // a UDP endpoint for the QUIC transport
 			),
 			libp2p.Security(libp2ptls.ID, libp2ptls.New),
 			libp2p.Security(secio.ID, secio.New),

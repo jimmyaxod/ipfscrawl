@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,8 @@ import (
 
 	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	mh "github.com/multiformats/go-multihash"
+
+	ipnspb "github.com/ipfs/go-ipns/pb"
 )
 
 /**
@@ -58,6 +61,9 @@ type DHT struct {
 	log_peerinfo       Outputdata
 	log_addproviders   Outputdata
 	log_getproviders   Outputdata
+	log_put            Outputdata
+	log_get            Outputdata
+	log_put_ipns       Outputdata
 	log_peer_protocols Outputdata
 	log_peer_agents    Outputdata
 	log_peer_ids       Outputdata
@@ -76,6 +82,9 @@ func NewDHT(hosts []host.Host) *DHT {
 		log_peer_ids:       NewOutputdata("peerids", output_file_period),
 		log_addproviders:   NewOutputdata("addproviders", output_file_period),
 		log_getproviders:   NewOutputdata("getproviders", output_file_period),
+		log_put:            NewOutputdata("put", output_file_period),
+		log_get:            NewOutputdata("get", output_file_period),
+		log_put_ipns:       NewOutputdata("put_ipns", output_file_period),
 		activePeers:        make(map[string]bool),
 	}
 
@@ -230,8 +239,46 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 		switch req.GetType() {
 		case 0:
 			atomic.AddUint64(&dht.metric_read_put_value, 1)
+
+			rec := req.GetRecord()
+
+			s := fmt.Sprintf("%s,%x,%x,%x,%s", peerID, req.GetKey(), rec.Key, rec.Value, rec.TimeReceived)
+			dht.log_put.WriteData(s)
+
+			// If it's ipns...
+			if strings.HasPrefix(string(rec.Key), "/ipns/") {
+				// Extract the PID...
+				pidbytes := rec.Key[6:]
+				pid, err := peer.IDFromBytes(pidbytes)
+				if err == nil {
+					// ok so it's an ipns record, so lets examine the data...
+					ipns_rec := ipnspb.IpnsEntry{}
+					err = ipns_rec.Unmarshal(rec.Value)
+					if err == nil {
+						// Log everything...
+						//pubkey := ipns_rec.GetPubKey()
+						//validity := ipns_rec.GetValidity()
+						//signature := ipns_rec.GetSignature()
+
+						ttl := ipns_rec.GetTtl()
+						seq := ipns_rec.GetSequence()
+						value := ipns_rec.GetValue()
+
+						s := fmt.Sprintf("%s,%s,%d,%d", pid.Pretty(), string(value), ttl, seq)
+						dht.log_put_ipns.WriteData(s)
+
+					} else {
+						fmt.Printf("Error unmarshalling ipns %v\n", err)
+					}
+				}
+			}
+
 		case 1:
 			atomic.AddUint64(&dht.metric_read_get_value, 1)
+
+			s := fmt.Sprintf("%s,%x", peerID, req.GetKey())
+			dht.log_get.WriteData(s)
+
 		case 2:
 			atomic.AddUint64(&dht.metric_read_add_provider, 1)
 
@@ -260,6 +307,7 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 			atomic.AddUint64(&dht.metric_read_find_node, 1)
 		case 5:
 			atomic.AddUint64(&dht.metric_read_ping, 1)
+			// We need to send back a PONG...
 		}
 
 		// Check out the FIND_NODE on that!
