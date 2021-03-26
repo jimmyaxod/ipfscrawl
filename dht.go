@@ -55,8 +55,9 @@ type DHT struct {
 	metric_read_ping            uint64
 	metric_peers_found          uint64
 
-	mu          sync.Mutex
-	activePeers map[string]bool
+	mu             sync.Mutex
+	activePeers    map[string]bool
+	numActivePeers int64
 
 	log_peerinfo       Outputdata
 	log_addproviders   Outputdata
@@ -113,9 +114,7 @@ func (dht *DHT) ShowStats() {
 		}
 	}
 
-	dht.mu.Lock()
-	active := len(dht.activePeers)
-	dht.mu.Unlock()
+	active := atomic.LoadInt64(&dht.numActivePeers)
 
 	fmt.Printf("DHT uptime=%.2fs active=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), active, dht.metric_peers_found)
 	fmt.Printf("Current Hosts cons=%d streams=%d peerstore=%d\n", total_connections, total_streams, total_peerstore)
@@ -225,6 +224,7 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 	defer func() {
 		dht.mu.Lock()
 		delete(dht.activePeers, peerID)
+		atomic.AddInt64(&dht.numActivePeers, -1)
 		dht.mu.Unlock()
 	}()
 
@@ -362,6 +362,7 @@ func (dht *DHT) ProcessPeerStream(s network.Stream) {
 		return
 	}
 	dht.activePeers[peerID] = true
+	atomic.AddInt64(&dht.numActivePeers, 1)
 	dht.mu.Unlock()
 
 	host := dht.hosts[0] // For now, since they all use the same anyways...
