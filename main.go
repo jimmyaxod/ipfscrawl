@@ -13,6 +13,9 @@ import (
 	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
 	secio "github.com/libp2p/go-libp2p-secio"
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 const (
@@ -23,6 +26,8 @@ const (
 // https://cloudflare-ipfs.com/ipfs/QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco/wiki/
 
 func main() {
+
+	go http.ListenAndServe("localhost:8080", nil)
 
 	ctx := context.TODO()
 

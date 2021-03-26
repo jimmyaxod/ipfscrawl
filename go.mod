@@ -1,4 +1,4 @@
-module github.com/jimmyaxod/ipfsl
+module github.com/jimmyaxod/ipfscrawl
 
 go 1.15
 

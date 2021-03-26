@@ -343,7 +343,15 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 				// Now lets go to this one...
 				// Aint no way I'm waiting though
-				go dht.Connect(pid)
+				dht.mu.Lock()
+				v, ok := dht.activePeers[pid.Pretty()]
+				dht.mu.Unlock()
+
+				if v && ok {
+					atomic.AddUint64(&dht.metric_con_outgoing_dupe, 1)
+				} else {
+					go dht.Connect(pid)
+				}
 			}
 		}
 	}
