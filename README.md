@@ -1,10 +1,11 @@
 # ipfscrawl
 IPFS crawler
 
-Very simple IPFS crawler to see what's going on with IPFS.
+Very simple IPFS crawler to see what's going on with IPFS and as a learning exersize.
 
 This is a very general purpose libp2p-kad-dht crawler implementation. It crawls around the DHT by periodically sending out
 FIND_NODE requests for random hashes. Peers reply with CloserPeers, which we then connect to and so the process repeats.
+This crawler operates at a low level in order to squeeze out more efficiency and flexibility.
 
 ## Configuration
 
@@ -17,7 +18,7 @@ We can also vary the maximum time we stay connected to each peer, and the freque
 
 ## Output data
 
-Whilst crawling, several output files are created. All are csv files with an initial field of unixtimestamp.
+Whilst crawling, several output files are created. All are csv files with an initial field of unixtimestamp. Periodically (default 1 hour) the output files are changed.
 
 | Filename      | Fields                                    |
 | ------------- | ----------------------------------------- |
@@ -27,6 +28,10 @@ Whilst crawling, several output files are created. All are csv files with an ini
 | peerids       | peerID, id_name, id_length, id_digest     |
 | addproviders  | peerID, CID, providerPeerID, multiaddr    |
 | getproviders  | peerID, CID                               |
+| get           | peerID, key                               |
+| get_ipns      | peerID, ID                                |
+| put           | peerID, key, rec_key, val, time_recvd     |
+| put_ipns      | peerID, pid, val, ttl, seq                |
 
 ## Performance
 
