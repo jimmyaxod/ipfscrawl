@@ -33,18 +33,15 @@ Whilst crawling, several output files are created. All are csv files with an ini
 | put           | peerID, key, rec_key, val, time_recvd     |
 | put_ipns      | peerID, pid, val, ttl, seq                |
 
-## Performance
+## Data
 
-Here are some numbers from 5 minutes uptime on a home residential connection.
+This is a limited 3 hour crawl, showing provider queries
 
-```
-DHT uptime=300.73s active=718 cons=4828 streams=9902 total_peers_found=274648
-Connections out=14877 (110539 fails) (122757 dupes) in=714
-Writes ping=55394 find_node=55389
-Reads put=0 get=0 addprov=3 getprov=13 find_node=14261 ping=14546
-```
+| Item                    | value     |
+| ----------------------- | --------- |
+| Raw addProvider calls   |   223,166 |
+| Unique addProvider      |   208,333 |
 
-Unique peer IDs found: 2682
 
 # Key types
 
