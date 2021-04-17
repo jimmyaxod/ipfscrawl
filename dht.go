@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -58,6 +59,9 @@ type DHT struct {
 	metric_read_ping            uint64
 	metric_peers_found          uint64
 
+	metric_active_writers int64
+	metric_active_readers int64
+
 	log_peerinfo       Outputdata
 	log_addproviders   Outputdata
 	log_getproviders   Outputdata
@@ -65,6 +69,7 @@ type DHT struct {
 	log_get            Outputdata
 	log_put_ipns       Outputdata
 	log_get_ipns       Outputdata
+	log_put_pk         Outputdata
 	log_peer_protocols Outputdata
 	log_peer_agents    Outputdata
 	log_peer_ids       Outputdata
@@ -92,6 +97,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		log_get:            NewOutputdata("get", output_file_period),
 		log_put_ipns:       NewOutputdata("put_ipns", output_file_period),
 		log_get_ipns:       NewOutputdata("get_ipns", output_file_period),
+		log_put_pk:         NewOutputdata("put_pk", output_file_period),
 		activePeers:        make(map[string]bool),
 	}
 
@@ -101,6 +107,18 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	}
 
 	return dht
+}
+
+// ReplaceHost replaces one of our hosts with a new fresh clean one
+func (dht *DHT) ReplaceHost(host host.Host) {
+	i := rand.Intn(len(dht.hosts))
+	// First we need to close the old one
+	fmt.Printf("CLOSING HOST %s\n", dht.hosts[i].ID().Pretty())
+	dht.hosts[i].Close()
+
+	// Now replace it with the new one...
+	host.SetStreamHandler(proto, dht.handleNewStream)
+	dht.hosts[i] = host
 }
 
 // ShowStats - print out some stats about our crawl
@@ -126,6 +144,11 @@ func (dht *DHT) ShowStats() {
 	fmt.Printf("Total Connections out=%d (%d fails) (%d dupes) in=%d\n", dht.metric_con_outgoing_success, dht.metric_con_outgoing_fail, dht.metric_con_outgoing_dupe, dht.metric_con_incoming)
 	fmt.Printf("Total Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
 
+	metric_active_writers := atomic.LoadInt64(&dht.metric_active_writers)
+	metric_active_readers := atomic.LoadInt64(&dht.metric_active_readers)
+
+	fmt.Printf("Active writers=%d readers=%d\n", metric_active_writers, metric_active_readers)
+
 	// Stats on incoming messages
 	fmt.Printf("Reads put=%d get=%d addprov=%d getprov=%d find_node=%d ping=%d\n",
 		dht.metric_read_put_value, dht.metric_read_get_value,
@@ -136,38 +159,45 @@ func (dht *DHT) ShowStats() {
 }
 
 // Connect connects to a new peer, and starts an eventloop for it
+// Assumes that tryConnectTo has already been called...
 func (dht *DHT) Connect(id peer.ID) error {
-	// If we are already connected to the peerID, don't bother
-	dht.mu.Lock()
-	v, ok := dht.activePeers[id.Pretty()]
-	dht.mu.Unlock()
-
-	if v && ok {
+	if !dht.tryConnectTo(id.Pretty()) {
 		atomic.AddUint64(&dht.metric_con_outgoing_dupe, 1)
-		return nil
+		return errors.New("Dupe")
 	}
 
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
 
-	s, err := host.NewStream(context.TODO(), id, proto)
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
+
+	s, err := host.NewStream(ctx, id, proto)
 	if err != nil {
 		atomic.AddUint64(&dht.metric_con_outgoing_fail, 1)
+		cancelFunc()
 		return err
 	}
 	atomic.AddUint64(&dht.metric_con_outgoing_success, 1)
-	dht.ProcessPeerStream(s)
+	dht.ProcessPeerStream(ctx, cancelFunc, s)
 	return nil
 }
 
 // handleNewStream handles incoming streams
 func (dht *DHT) handleNewStream(s network.Stream) {
-	atomic.AddUint64(&dht.metric_con_incoming, 1)
-	dht.ProcessPeerStream(s)
+	pid := s.Conn().RemotePeer()
+
+	if dht.tryConnectTo(pid.Pretty()) {
+		atomic.AddUint64(&dht.metric_con_incoming, 1)
+		ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
+		dht.ProcessPeerStream(ctx, cancelFunc, s)
+	}
 }
 
 // doPeriodicWrites handles sending periodic FIND_NODE and PING
 func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelFunc, s io.Writer) {
+	atomic.AddInt64(&dht.metric_active_writers, 1)
+	defer atomic.AddInt64(&dht.metric_active_writers, -1)
+
 	defer cancelFunc()
 
 	w := msgio.NewVarintWriter(s)
@@ -220,18 +250,16 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 
 // doReading reads msgs from stream and processes...
 func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, peerID string) {
+	atomic.AddInt64(&dht.metric_active_readers, 1)
+	defer atomic.AddInt64(&dht.metric_active_readers, -1)
+
 	defer cancelFunc()
 
 	// Close the stream in the reader only...
 	defer s.Close()
 
 	// When we're done reading, we'll remove from activePeers...
-	defer func() {
-		dht.mu.Lock()
-		delete(dht.activePeers, peerID)
-		atomic.AddInt64(&dht.numActivePeers, -1)
-		dht.mu.Unlock()
-	}()
+	defer dht.releaseConnectTo(peerID)
 
 	r := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
 
@@ -259,6 +287,16 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 			// TODO: /pk/ - maps Hash(pubkey) to pubkey
 
+			if strings.HasPrefix(string(rec.Key), "/pk/") {
+				// Extract the PID...
+				pidbytes := rec.Key[4:]
+				pid, err := peer.IDFromBytes(pidbytes)
+				if err == nil {
+					s := fmt.Sprintf("%s,%s,%x", peerID, pid.Pretty(), rec.Value)
+					dht.log_put_pk.WriteData(s)
+				}
+			}
+
 			// If it's ipns...
 			if strings.HasPrefix(string(rec.Key), "/ipns/") {
 				// Extract the PID...
@@ -278,7 +316,7 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 						seq := ipns_rec.GetSequence()
 						value := ipns_rec.GetValue()
 
-						s := fmt.Sprintf("%s,%s,%d,%d", pid.Pretty(), string(value), ttl, seq)
+						s := fmt.Sprintf("%s,%s,%s,%d,%d", peerID, pid.Pretty(), string(value), ttl, seq)
 						dht.log_put_ipns.WriteData(s)
 
 					} else {
@@ -352,20 +390,34 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 				atomic.AddUint64(&dht.metric_peers_found, 1)
 
-				// Now lets go to this one...
-				// Aint no way I'm waiting though
-				dht.mu.Lock()
-				v, ok := dht.activePeers[pid.Pretty()]
-				dht.mu.Unlock()
-
-				if v && ok {
-					atomic.AddUint64(&dht.metric_con_outgoing_dupe, 1)
-				} else {
-					go dht.Connect(pid)
-				}
+				go dht.Connect(pid)
 			}
 		}
 	}
+}
+
+// tryConnectTo
+func (dht *DHT) tryConnectTo(pid string) bool {
+	dht.mu.Lock()
+	defer dht.mu.Unlock()
+	v, ok := dht.activePeers[pid]
+	if v && ok {
+		return false
+	}
+	dht.activePeers[pid] = true
+	atomic.AddInt64(&dht.numActivePeers, 1)
+	return true
+}
+
+func (dht *DHT) releaseConnectTo(pid string) {
+	dht.mu.Lock()
+	defer dht.mu.Unlock()
+	_, ok := dht.activePeers[pid]
+	if !ok {
+		panic("ERROR in activePeers")
+	}
+	delete(dht.activePeers, pid)
+	atomic.AddInt64(&dht.numActivePeers, -1)
 }
 
 // Filter out some common unconnectable addresses...
@@ -402,51 +454,39 @@ func isConnectable(a multiaddr.Multiaddr) bool {
 }
 
 // Process a peer stream
-func (dht *DHT) ProcessPeerStream(s network.Stream) {
+func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream) {
 	pid := s.Conn().RemotePeer()
-	peerID := pid.Pretty()
 
-	// Add it in to activePeers, so we don't have dupe connections
-	dht.mu.Lock()
-	v, ok := dht.activePeers[peerID]
-	if v && ok {
-		dht.mu.Unlock()
-		s.Close()
-		return
-	}
-	dht.activePeers[peerID] = true
-	atomic.AddInt64(&dht.numActivePeers, 1)
-	dht.mu.Unlock()
-
-	host := dht.hosts[0] // For now, since they all use the same anyways...
-
-	// Find out some info about the peer...
-	protocols, err := host.Peerstore().GetProtocols(pid)
-	if err == nil {
-		for _, proto := range protocols {
-			s := fmt.Sprintf("%s,%s", peerID, proto)
-			dht.log_peer_protocols.WriteData(s)
-		}
-	}
-
-	agent, err := host.Peerstore().Get(pid, "AgentVersion")
-	if err == nil {
-		s := fmt.Sprintf("%s,%s", peerID, agent)
-		dht.log_peer_agents.WriteData(s)
-	}
-
-	decoded, err := mh.Decode([]byte(pid))
-	if err == nil {
-		s := fmt.Sprintf("%s,%s,%d,%x", peerID, decoded.Name, decoded.Length, decoded.Digest)
-		dht.log_peer_ids.WriteData(s)
-	}
-
-	// Lets only use the connection for so long... 10 minutes?
-	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
+	dht.WritePeerInfo(pid)
 
 	// Start something up to periodically FIND_NODE and PING
 	go dht.doPeriodicWrites(ctx, cancelFunc, s)
 
 	// Start something to read messages
-	go dht.doReading(ctx, cancelFunc, s, peerID)
+	go dht.doReading(ctx, cancelFunc, s, pid.Pretty())
+}
+
+// WritePeerInfo - write some data from our peerstore for pid
+func (dht *DHT) WritePeerInfo(pid peer.ID) {
+	// Find out some info about the peer...
+	protocols, err := dht.peerstore.GetProtocols(pid)
+	if err == nil {
+		for _, proto := range protocols {
+			s := fmt.Sprintf("%s,%s", pid.Pretty(), proto)
+			dht.log_peer_protocols.WriteData(s)
+		}
+	}
+
+	agent, err := dht.peerstore.Get(pid, "AgentVersion")
+	if err == nil {
+		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
+		dht.log_peer_agents.WriteData(s)
+	}
+
+	decoded, err := mh.Decode([]byte(pid))
+	if err == nil {
+		s := fmt.Sprintf("%s,%s,%d,%x", pid.Pretty(), decoded.Name, decoded.Length, decoded.Digest)
+		dht.log_peer_ids.WriteData(s)
+	}
+
 }
