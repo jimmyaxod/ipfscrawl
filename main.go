@@ -38,7 +38,7 @@ func main() {
 
 	useDefaultBootstrap := flag.Bool("defaultbootstrap", false, "Use default bootstrap servers")
 	bootstrap := flag.String("bootstrap", "", "Node to bootstrap from")
-	NUM_HOSTS := flag.Int("hosts", 4, "Number of hosts to have running")
+	NUM_HOSTS := flag.Int("hosts", 12, "Number of hosts to have running")
 	flag.Parse()
 
 	//	go http.ListenAndServe("localhost:8080", nil)
