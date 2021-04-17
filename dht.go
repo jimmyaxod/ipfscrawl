@@ -249,7 +249,10 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 }
 
 // doReading reads msgs from stream and processes...
-func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, peerID string) {
+func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream) {
+	peerID := s.Conn().RemotePeer().Pretty()
+	localPeerID := s.Conn().LocalPeer().Pretty()
+
 	atomic.AddInt64(&dht.metric_active_readers, 1)
 	defer atomic.AddInt64(&dht.metric_active_readers, -1)
 
@@ -382,8 +385,8 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 						dht.peerstore.AddAddr(pid, ad, 12*time.Hour)
 
-						// fromPeerID, newPeerID, addr
-						s := fmt.Sprintf("%s,%s,%s", peerID, pid, ad)
+						// localPeerID, fromPeerID, newPeerID, addr
+						s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
 						dht.log_peerinfo.WriteData(s)
 					}
 				}
@@ -463,7 +466,7 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 	go dht.doPeriodicWrites(ctx, cancelFunc, s)
 
 	// Start something to read messages
-	go dht.doReading(ctx, cancelFunc, s, pid.Pretty())
+	go dht.doReading(ctx, cancelFunc, s)
 }
 
 // WritePeerInfo - write some data from our peerstore for pid

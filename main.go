@@ -1,14 +1,22 @@
 package main
 
+/**
+ * Simple DHT crawler
+ *
+ */
+
 import (
 	"context"
+	"flag"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/peer"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	noise "github.com/libp2p/go-libp2p-noise"
 	peerstore "github.com/libp2p/go-libp2p-peerstore"
@@ -16,8 +24,8 @@ import (
 	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
 	secio "github.com/libp2p/go-libp2p-secio"
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
+	"github.com/multiformats/go-multiaddr"
 
-	"net/http"
 	_ "net/http/pprof"
 )
 
@@ -32,7 +40,7 @@ const (
 
 func main() {
 
-	go http.ListenAndServe("localhost:8080", nil)
+	//	go http.ListenAndServe("localhost:8080", nil)
 
 	ctx := context.TODO()
 
@@ -47,33 +55,28 @@ func main() {
 	// Create a dht crawler using the above hosts
 	dhtc := NewDHT(peerstore, hosts)
 
-	/*
-		targetID, err := peer.Decode("QmYHqPxxfrc4hFXUAqcWNtCu6E7BL7v5EitZdk4uUJekg2")
-		if err != nil {
-			fmt.Printf("error %v\n", err)
-		}
-		targetA, err := multiaddr.NewMultiaddr("/ip4/127.0.0.1/udp/9000/quic")
-		host.Peerstore().AddAddr(targetID, targetA, time.Hour)
-		dhtc.Connect(targetID)
-	*/
-
-	addrs := dht.GetDefaultBootstrapPeerAddrInfos()
-	// Put them in the peerstores...
-	for _, addr := range addrs {
-		for _, a := range addr.Addrs {
-			fmt.Printf("Bootstrap %s %s\n", addr.ID, a)
-		}
-		for _, host := range hosts {
-			host.Peerstore().AddAddrs(addr.ID, addr.Addrs, time.Hour)
-		}
+	bootstrap := flag.String("bootstrap", "", "Node to bootstrap from")
+	if *bootstrap != "" {
+		bits := strings.Split(*bootstrap, "@")
+		id := bits[0]
+		addr := bits[1]
+		connect(dhtc, id, addr)
 	}
 
-	for _, addr := range addrs {
-		dhtc.Connect(addr.ID)
+	useDefaultBootstrap := flag.Bool("defaultbootstrap", false, "Use default bootstrap servers")
+	if *useDefaultBootstrap {
+		addrs := dht.GetDefaultBootstrapPeerAddrInfos()
+		// Put them in the peerstores...
+		for _, addr := range addrs {
+			for _, a := range addr.Addrs {
+				fmt.Printf("Bootstrap %s %s\n", addr.ID, a)
+			}
+			dhtc.peerstore.AddAddrs(addr.ID, addr.Addrs, time.Hour)
+			dhtc.Connect(addr.ID)
+		}
 	}
 
 	ticker_stats := time.NewTicker(10 * time.Second)
-
 	ticker_nuke_host := time.NewTicker(10 * time.Minute)
 
 	for {
@@ -87,6 +90,18 @@ func main() {
 		}
 	}
 
+}
+
+// connect to something
+func connect(dhtc *DHT, id string, addr string) {
+	fmt.Printf("Connecting to %s %s...\n", id, addr)
+	targetID, err := peer.Decode(id)
+	if err != nil {
+		fmt.Printf("error %v\n", err)
+	}
+	targetA, err := multiaddr.NewMultiaddr(addr)
+	dhtc.peerstore.AddAddr(targetID, targetA, time.Hour)
+	dhtc.Connect(targetID)
 }
 
 // Create a new host...
@@ -123,6 +138,6 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 		if err == nil {
 			return myhost
 		}
+		fmt.Printf("Finding free port...\n")
 	}
-
 }
