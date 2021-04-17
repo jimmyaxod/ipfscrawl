@@ -29,10 +29,6 @@ import (
 	_ "net/http/pprof"
 )
 
-const (
-	NUM_HOSTS = 4
-)
-
 // Example:
 
 // https://cloudflare-ipfs.com/ipns/12D3KooWSPahV81xHimuUKrwNnonYgVrDMs1JtqmT3B12zsY5F6f
@@ -41,17 +37,18 @@ const (
 func main() {
 
 	bootstrap := flag.String("bootstrap", "", "Node to bootstrap from")
+	NUM_HOSTS := flag.Int("hosts", 4, "Number of hosts to have running")
 	flag.Parse()
 
 	//	go http.ListenAndServe("localhost:8080", nil)
 
 	ctx := context.TODO()
 
-	hosts := make([]host.Host, NUM_HOSTS)
+	hosts := make([]host.Host, *NUM_HOSTS)
 
 	peerstore := pstoremem.NewPeerstore()
 
-	for i := 0; i < NUM_HOSTS; i++ {
+	for i := 0; i < len(hosts); i++ {
 		hosts[i] = createHost(ctx, peerstore)
 	}
 
