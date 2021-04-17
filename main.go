@@ -40,6 +40,9 @@ const (
 
 func main() {
 
+	bootstrap := flag.String("bootstrap", "", "Node to bootstrap from")
+	flag.Parse()
+
 	//	go http.ListenAndServe("localhost:8080", nil)
 
 	ctx := context.TODO()
@@ -55,7 +58,6 @@ func main() {
 	// Create a dht crawler using the above hosts
 	dhtc := NewDHT(peerstore, hosts)
 
-	bootstrap := flag.String("bootstrap", "", "Node to bootstrap from")
 	if *bootstrap != "" {
 		bits := strings.Split(*bootstrap, "@")
 		id := bits[0]
