@@ -36,14 +36,13 @@ import (
 // https://cloudflare-ipfs.com/ipfs/QmTenMnimYgzfX96qdu1kHka1S68v9PxXi8pgHd29tJywT
 
 func main() {
-
 	useDefaultBootstrap := flag.Bool("defaultbootstrap", false, "Use default bootstrap servers")
 	bootstrap := flag.String("bootstrap", "", "Node to bootstrap from")
 	NUM_HOSTS := flag.Int("hosts", 12, "Number of hosts to have running")
 	flag.Parse()
 
 	// So we can see pprof info
-	go http.ListenAndServe("localhost:8080", nil)
+	go http.ListenAndServe("0.0.0.0:8080", nil)
 
 	ctx := context.TODO()
 
