@@ -1,5 +1,22 @@
 package main
 
+/*
+DHT uptime=55201.76s active=21010 total_peers_found=27123493
+Current Hosts cons=5196 streams=13378 peerstore=45215
+Total Connections out=167291 (20725 fails) (26935482 dupes) in=1464232
+Total Writes ping=1370331 find_node=4863266
+Active writers=274 readers=285
+Reads put=1440 get=334 addprov=82496 getprov=678241 find_node=2080983 ping=402829
+
+DHT uptime=170.79s active=12320 total_peers_found=793884
+Current Hosts cons=9377 streams=10303 peerstore=13308
+Total Connections out=15999 (2971 fails) (774268 dupes) in=2553
+Total Writes ping=22348 find_node=83410
+Active writers=8176 readers=9122
+Reads put=0 get=0 addprov=126 getprov=153 find_node=46438 ping=9044
+
+*/
+
 import (
 	"context"
 	"errors"

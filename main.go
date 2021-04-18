@@ -26,6 +26,7 @@ import (
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
 	"github.com/multiformats/go-multiaddr"
 
+	"net/http"
 	_ "net/http/pprof"
 )
 
@@ -41,7 +42,8 @@ func main() {
 	NUM_HOSTS := flag.Int("hosts", 12, "Number of hosts to have running")
 	flag.Parse()
 
-	//	go http.ListenAndServe("localhost:8080", nil)
+	// So we can see pprof info
+	go http.ListenAndServe("localhost:8080", nil)
 
 	ctx := context.TODO()
 
