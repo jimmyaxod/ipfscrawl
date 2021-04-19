@@ -80,12 +80,14 @@ func (nd *NodeDetails) Add(id string) {
 	defer nd.mutex.Unlock()
 	_, ok := nd.nodes[id]
 	if !ok {
+		now := time.Now()
 		info := &NodeInfo{
-			id:                 id,
-			foundTime:          time.Now(),
-			lastConnectedTime:  time.Now(),
-			numConnectFailures: 0,
-			connected:          false,
+			id:                        id,
+			foundTime:                 now,
+			lastConnectedTime:         now.Add(-24 * time.Hour),
+			lastConnectionAttemptTime: now.Add(-24 * time.Hour),
+			numConnectFailures:        0,
+			connected:                 false,
 		}
 		nd.allIDs = append(nd.allIDs, id)
 		nd.nodes[id] = info
@@ -158,7 +160,12 @@ func (nd *NodeDetails) ReadyForConnect(id string) bool {
 	if !ok {
 		return false
 	}
-	return readyForConnect(info)
+	if readyForConnect(info) {
+		nd.nodes[id].lastConnectionAttemptTime = time.Now()
+
+		return true
+	}
+	return false
 }
 
 // readyForConnect tells us if a node is ready for reconnection
@@ -168,22 +175,17 @@ func readyForConnect(ni *NodeInfo) bool {
 		return false
 	}
 
-	// First check if it's never been connected to
-	if ni.lastConnectedTime == ni.foundTime {
-		return true
+	// Next check if there's a recent connection attempt
+	if time.Since(ni.lastConnectionAttemptTime) < DelayConnectAttemptDuration {
+		return false
 	}
 
 	// Next check if it's recently been connected to
-	if time.Since(ni.lastConnectedTime) > DelayReconnectDuration {
-		return true
+	if time.Since(ni.lastConnectedTime) < DelayReconnectDuration {
+		return false
 	}
 
-	// Next check if there's a recent connection attempt
-	if time.Since(ni.lastConnectionAttemptTime) > DelayConnectAttemptDuration {
-		return true
-	}
-
-	return false
+	return true
 }
 
 func shouldExpire(ni *NodeInfo) bool {

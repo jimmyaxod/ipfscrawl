@@ -19,7 +19,6 @@ Reads put=0 get=0 addprov=126 getprov=153 find_node=46438 ping=9044
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -136,18 +135,25 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	go func() {
 		for {
 			// Check if we should top us up...
-			total_connections := 0
+			total_dht_streams := 0
 			for _, host := range dht.hosts {
 				cons := host.Network().Conns()
-				total_connections += len(cons)
+				for _, con := range cons {
+					for _, stream := range con.GetStreams() {
+						if stream.Protocol() == proto {
+							total_dht_streams++
+						}
+					}
+				}
 			}
 
-			if total_connections < dht.target_connections {
+			if total_dht_streams < dht.target_connections {
 				// Find something to connect to
 				p := dht.nodedetails.Get()
 				if p != "" {
 					targetID, err := peer.Decode(p)
 					if err == nil {
+						//fmt.Printf("Would try connect to %v\n", targetID)
 						go dht.Connect(targetID)
 					}
 				}
@@ -228,13 +234,17 @@ func (dht *DHT) ShowStats() {
 // Connect connects to a new peer, and starts an eventloop for it
 // Assumes that tryConnectTo has already been called...
 func (dht *DHT) Connect(id peer.ID) error {
+	//	fmt.Printf("Outgoing [%s]\n", id.Pretty())
+
 	dht.nodedetails.Add(id.Pretty())
+	/*
+		FOR NOW...
 
-	if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
-		atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
-		return errors.New("Dupe")
-	}
-
+		if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
+			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
+			return errors.New("Dupe")
+		}
+	*/
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
 
@@ -258,14 +268,17 @@ func (dht *DHT) Connect(id peer.ID) error {
 func (dht *DHT) handleNewStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
 
+	//	fmt.Printf("Incoming [%s]\n", pid.Pretty())
+
 	// Check if we should reject it
 	dht.nodedetails.Add(pid.Pretty())
-	if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
-		atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
-		s.Close()
-		return
-	}
-
+	/*
+		if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
+			atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
+			s.Close()
+			return
+		}
+	*/
 	// Handle it...
 	dht.nodedetails.ConnectSuccess(pid.Pretty())
 	dht.nodedetails.Connected(pid.Pretty())
