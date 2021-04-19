@@ -67,9 +67,8 @@ type DHT struct {
 
 	metric_con_outgoing_fail     uint64
 	metric_con_outgoing_success  uint64
-	metric_con_outgoing_dupe     uint64
+	metric_con_outgoing_rejected uint64
 	metric_con_incoming          uint64
-	metric_con_incoming_dupe     uint64
 	metric_con_incoming_rejected uint64
 	metric_written_ping          uint64
 	metric_written_find_node     uint64
@@ -98,9 +97,8 @@ type DHT struct {
 	log_sessions_r     Outputdata
 	log_sessions_w     Outputdata
 
-	mu             sync.Mutex
-	activePeers    map[string]bool
-	numActivePeers int64
+	mu          sync.Mutex
+	activePeers map[string]bool
 }
 
 // NewDHT creates a new DHT on top of the given hosts
@@ -179,6 +177,7 @@ func (dht *DHT) ShowStats() {
 	// How many connections do we have?, how many streams?
 	total_connections := 0
 	total_streams := 0
+	total_dht_streams := 0
 	total_peerstore := dht.peerstore.Peers().Len()
 
 	for _, host := range dht.hosts {
@@ -187,19 +186,26 @@ func (dht *DHT) ShowStats() {
 		total_connections += len(cons)
 		for _, con := range cons {
 			total_streams += len(con.GetStreams())
+			for _, stream := range con.GetStreams() {
+				if stream.Protocol() == proto {
+					total_dht_streams++
+				}
+			}
 		}
 	}
 
-	active := atomic.LoadInt64(&dht.numActivePeers)
-
-	fmt.Printf("DHT uptime=%.2fs active=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), active, dht.metric_peers_found)
-	fmt.Printf("Current Hosts cons=%d streams=%d peerstore=%d\n", total_connections, total_streams, total_peerstore)
-	fmt.Printf("Total Connections out=%d (%d fails) (%d dupes) in=%d (%d dupes) (%d rejected)\n",
+	fmt.Printf("DHT uptime=%.2fs total_peers_found=%d\n", time.Since(dht.started).Seconds(), dht.metric_peers_found)
+	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d peerstore=%d\n",
+		len(dht.hosts),
+		total_connections,
+		total_streams,
+		total_dht_streams,
+		total_peerstore)
+	fmt.Printf("Total Connections out=%d (%d fails) (%d rejected) in=%d (%d rejected)\n",
 		dht.metric_con_outgoing_success,
 		dht.metric_con_outgoing_fail,
-		dht.metric_con_outgoing_dupe,
+		dht.metric_con_outgoing_rejected,
 		dht.metric_con_incoming,
-		dht.metric_con_incoming_dupe,
 		dht.metric_con_incoming_rejected)
 	fmt.Printf("Total Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
 
@@ -224,8 +230,8 @@ func (dht *DHT) ShowStats() {
 func (dht *DHT) Connect(id peer.ID) error {
 	dht.nodedetails.Add(id.Pretty())
 
-	if !dht.tryConnectTo(id.Pretty()) {
-		atomic.AddUint64(&dht.metric_con_outgoing_dupe, 1)
+	if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
+		atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
 		return errors.New("Dupe")
 	}
 
@@ -260,20 +266,13 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 		return
 	}
 
-	if dht.tryConnectTo(pid.Pretty()) {
+	// Handle it...
+	dht.nodedetails.ConnectSuccess(pid.Pretty())
+	dht.nodedetails.Connected(pid.Pretty())
 
-		// Handle it...
-		dht.nodedetails.ConnectSuccess(pid.Pretty())
-		dht.nodedetails.Connected(pid.Pretty())
-
-		atomic.AddUint64(&dht.metric_con_incoming, 1)
-		ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
-		dht.ProcessPeerStream(ctx, cancelFunc, s)
-	} else {
-		atomic.AddUint64(&dht.metric_con_incoming_dupe, 1)
-		// Close it
-		s.Close()
-	}
+	atomic.AddUint64(&dht.metric_con_incoming, 1)
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
+	dht.ProcessPeerStream(ctx, cancelFunc, s)
 }
 
 // doPeriodicWrites handles sending periodic FIND_NODE and PING
@@ -370,9 +369,6 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 	// Close the stream in the reader only...
 	defer s.Close()
-
-	// When we're done reading, we'll remove from activePeers...
-	defer dht.releaseConnectTo(peerID)
 
 	defer dht.nodedetails.Disconnected(peerID)
 
@@ -519,30 +515,6 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 			}
 		}
 	}
-}
-
-// tryConnectTo
-func (dht *DHT) tryConnectTo(pid string) bool {
-	dht.mu.Lock()
-	defer dht.mu.Unlock()
-	v, ok := dht.activePeers[pid]
-	if v && ok {
-		return false
-	}
-	dht.activePeers[pid] = true
-	atomic.AddInt64(&dht.numActivePeers, 1)
-	return true
-}
-
-func (dht *DHT) releaseConnectTo(pid string) {
-	dht.mu.Lock()
-	defer dht.mu.Unlock()
-	_, ok := dht.activePeers[pid]
-	if !ok {
-		panic("ERROR in activePeers")
-	}
-	delete(dht.activePeers, pid)
-	atomic.AddInt64(&dht.numActivePeers, -1)
 }
 
 // Filter out some common unconnectable addresses...
