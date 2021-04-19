@@ -20,6 +20,7 @@ type NodeInfo struct {
 	lastConnectionAttemptTime time.Time
 	lastConnectedTime         time.Time
 	numConnectFailures        int
+	connected                 bool
 }
 
 // NodeDetails contains info about lots of nodes
@@ -43,6 +44,7 @@ func (nd *NodeDetails) Stats() string {
 	total_nodes := 0
 	total_ready := 0
 	total_expired := 0
+	total_connected := 0
 
 	total_sinceconnect := 0 * time.Second
 
@@ -55,12 +57,21 @@ func (nd *NodeDetails) Stats() string {
 			total_expired++
 		}
 
+		if info.connected {
+			total_connected++
+		}
+
 		total_sinceconnect += time.Since(info.lastConnectedTime)
 	}
 
 	avg_since := total_sinceconnect.Seconds() / float64(total_nodes)
 
-	return fmt.Sprintf("NodeDetails nodes=%d ready=%d expired=%d avg_since=%.0f seconds\n", total_nodes, total_ready, total_expired, avg_since)
+	return fmt.Sprintf("NodeDetails nodes=%d connected=%d ready=%d expired=%d avg_since=%.0f seconds\n",
+		total_nodes,
+		total_connected,
+		total_ready,
+		total_expired,
+		avg_since)
 }
 
 // Add adds a node if it doesn't already exist.
@@ -74,6 +85,7 @@ func (nd *NodeDetails) Add(id string) {
 			foundTime:          time.Now(),
 			lastConnectedTime:  time.Now(),
 			numConnectFailures: 0,
+			connected:          false,
 		}
 		nd.allIDs = append(nd.allIDs, id)
 		nd.nodes[id] = info
@@ -118,8 +130,32 @@ func (nd *NodeDetails) ConnectFailure(id string) {
 	}
 }
 
+// Connected Callback
+func (nd *NodeDetails) Connected(id string) {
+	nd.mutex.Lock()
+	defer nd.mutex.Unlock()
+	info, ok := nd.nodes[id]
+	if ok {
+		info.connected = true
+	}
+}
+
+// Disconnected Callback
+func (nd *NodeDetails) Disconnected(id string) {
+	nd.mutex.Lock()
+	defer nd.mutex.Unlock()
+	info, ok := nd.nodes[id]
+	if ok {
+		info.connected = false
+	}
+}
+
 // readyForConnect tells us if a node is ready for reconnection
 func readyForConnect(ni *NodeInfo) bool {
+
+	if ni.connected {
+		return false
+	}
 
 	// First check if it's never been connected to
 	if ni.lastConnectedTime == ni.foundTime {

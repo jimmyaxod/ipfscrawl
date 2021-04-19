@@ -234,6 +234,7 @@ func (dht *DHT) Connect(id peer.ID) error {
 		cancelFunc()
 		return err
 	}
+	dht.nodedetails.Connected(id.Pretty())
 	dht.nodedetails.ConnectSuccess(id.Pretty())
 	atomic.AddUint64(&dht.metric_con_outgoing_success, 1)
 	dht.ProcessPeerStream(ctx, cancelFunc, s)
@@ -249,6 +250,7 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 		// Handle it...
 		dht.nodedetails.Add(pid.Pretty())
 		dht.nodedetails.ConnectSuccess(pid.Pretty())
+		dht.nodedetails.Connected(pid.Pretty())
 
 		atomic.AddUint64(&dht.metric_con_incoming, 1)
 		ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
@@ -357,6 +359,8 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 	// When we're done reading, we'll remove from activePeers...
 	defer dht.releaseConnectTo(peerID)
+
+	defer dht.nodedetails.Disconnected(peerID)
 
 	r := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
 
