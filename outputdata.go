@@ -60,9 +60,9 @@ func (od *Outputdata) WriteData(d string) (int, error) {
 	var err error
 
 	// Check if we have the right name...
-	ext := ".log"
+	ext := "log"
 	if od.gzip {
-		ext = ".log.gz"
+		ext = "log.gz"
 	}
 	ff := GetFilename(od.n, od.period, ext)
 	if ff != od.current {

@@ -149,12 +149,12 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 				if p != "" {
 					targetID, err := peer.Decode(p)
 					if err == nil {
-						dht.Connect(targetID)
+						go dht.Connect(targetID)
 					}
 				}
+			} else {
+				time.Sleep(100 * time.Millisecond)
 			}
-
-			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 
