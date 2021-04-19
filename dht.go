@@ -65,20 +65,21 @@ type DHT struct {
 
 	started time.Time
 
-	metric_con_outgoing_fail    uint64
-	metric_con_outgoing_success uint64
-	metric_con_outgoing_dupe    uint64
-	metric_con_incoming         uint64
-	metric_con_incoming_dupe    uint64
-	metric_written_ping         uint64
-	metric_written_find_node    uint64
-	metric_read_put_value       uint64
-	metric_read_get_value       uint64
-	metric_read_add_provider    uint64
-	metric_read_get_provider    uint64
-	metric_read_find_node       uint64
-	metric_read_ping            uint64
-	metric_peers_found          uint64
+	metric_con_outgoing_fail     uint64
+	metric_con_outgoing_success  uint64
+	metric_con_outgoing_dupe     uint64
+	metric_con_incoming          uint64
+	metric_con_incoming_dupe     uint64
+	metric_con_incoming_rejected uint64
+	metric_written_ping          uint64
+	metric_written_find_node     uint64
+	metric_read_put_value        uint64
+	metric_read_get_value        uint64
+	metric_read_add_provider     uint64
+	metric_read_get_provider     uint64
+	metric_read_find_node        uint64
+	metric_read_ping             uint64
+	metric_peers_found           uint64
 
 	metric_active_writers int64
 	metric_active_readers int64
@@ -193,7 +194,13 @@ func (dht *DHT) ShowStats() {
 
 	fmt.Printf("DHT uptime=%.2fs active=%d total_peers_found=%d\n", time.Since(dht.started).Seconds(), active, dht.metric_peers_found)
 	fmt.Printf("Current Hosts cons=%d streams=%d peerstore=%d\n", total_connections, total_streams, total_peerstore)
-	fmt.Printf("Total Connections out=%d (%d fails) (%d dupes) in=%d (%d dupes)\n", dht.metric_con_outgoing_success, dht.metric_con_outgoing_fail, dht.metric_con_outgoing_dupe, dht.metric_con_incoming, dht.metric_con_incoming_dupe)
+	fmt.Printf("Total Connections out=%d (%d fails) (%d dupes) in=%d (%d dupes) (%d rejected)\n",
+		dht.metric_con_outgoing_success,
+		dht.metric_con_outgoing_fail,
+		dht.metric_con_outgoing_dupe,
+		dht.metric_con_incoming,
+		dht.metric_con_incoming_dupe,
+		dht.metric_con_incoming_rejected)
 	fmt.Printf("Total Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
 
 	metric_active_writers := atomic.LoadInt64(&dht.metric_active_writers)
@@ -244,6 +251,13 @@ func (dht *DHT) Connect(id peer.ID) error {
 // handleNewStream handles incoming streams
 func (dht *DHT) handleNewStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
+
+	// Check if we should reject it
+	if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
+		atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
+		s.Close()
+		return
+	}
 
 	if dht.tryConnectTo(pid.Pretty()) {
 

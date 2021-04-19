@@ -150,6 +150,17 @@ func (nd *NodeDetails) Disconnected(id string) {
 	}
 }
 
+// ReadyForConnect checks if a node is ready/due for connection
+func (nd *NodeDetails) ReadyForConnect(id string) bool {
+	nd.mutex.Lock()
+	defer nd.mutex.Unlock()
+	info, ok := nd.nodes[id]
+	if !ok {
+		return false
+	}
+	return readyForConnect(info)
+}
+
 // readyForConnect tells us if a node is ready for reconnection
 func readyForConnect(ni *NodeInfo) bool {
 
