@@ -253,6 +253,7 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
 
 	// Check if we should reject it
+	dht.nodedetails.Add(pid.Pretty())
 	if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
 		atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
 		s.Close()
@@ -262,7 +263,6 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	if dht.tryConnectTo(pid.Pretty()) {
 
 		// Handle it...
-		dht.nodedetails.Add(pid.Pretty())
 		dht.nodedetails.ConnectSuccess(pid.Pretty())
 		dht.nodedetails.Connected(pid.Pretty())
 
