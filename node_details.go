@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	peer "github.com/libp2p/go-libp2p-core/peer"
 	peerstore "github.com/libp2p/go-libp2p-core/peerstore"
 )
 
@@ -107,8 +108,8 @@ func (nd *NodeDetails) Add(id string) {
 					break
 				}
 			}
-			//			pid, _ := peer.IDFromString(id)
-			//			nd.peerstore.RemovePeer(pid)
+			pid, _ := peer.IDFromString(id)
+			nd.peerstore.RemovePeer(pid)
 		}
 
 		now := time.Now()
@@ -139,8 +140,8 @@ func (nd *NodeDetails) Remove(id string) {
 				break
 			}
 		}
-		//		pid, _ := peer.IDFromString(id)
-		//		nd.peerstore.RemovePeer(pid)
+		pid, _ := peer.IDFromString(id)
+		nd.peerstore.RemovePeer(pid)
 	}
 }
 
