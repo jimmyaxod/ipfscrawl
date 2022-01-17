@@ -17,12 +17,11 @@ import (
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/libp2p/go-libp2p-core/peerstore"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	noise "github.com/libp2p/go-libp2p-noise"
-	peerstore "github.com/libp2p/go-libp2p-peerstore"
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
-	secio "github.com/libp2p/go-libp2p-secio"
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
 	"github.com/multiformats/go-multiaddr"
 
@@ -48,7 +47,9 @@ func main() {
 
 	hosts := make([]host.Host, *NUM_HOSTS)
 
-	peerstore := pstoremem.NewPeerstore()
+	peerstore, _ := pstoremem.NewPeerstore()
+
+	//	connman, _ := connmgr.NewConnManager(2400, 3200)
 
 	for i := 0; i < len(hosts); i++ {
 		hosts[i] = createHost(ctx, peerstore)
@@ -77,16 +78,16 @@ func main() {
 	}
 
 	ticker_stats := time.NewTicker(10 * time.Second)
-	ticker_nuke_host := time.NewTicker(10 * time.Minute)
+	//	ticker_nuke_host := time.NewTicker(10 * time.Minute)
 
 	for {
 		select {
 		case <-ticker_stats.C:
 			dhtc.ShowStats()
-		case <-ticker_nuke_host.C:
+			//		case <-ticker_nuke_host.C:
 			// Create a new host, and replace it...
-			myhost := createHost(ctx, peerstore)
-			dhtc.ReplaceHost(myhost)
+			//			myhost := createHost(ctx, peerstore)
+			//			dhtc.ReplaceHost(myhost)
 		}
 	}
 
@@ -119,7 +120,7 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 		port := 4000 + rand.Intn(2000)
 
 		// Create a new host...
-		myhost, err := libp2p.New(ctx,
+		myhost, err := libp2p.New(
 			libp2p.Identity(priv),
 			libp2p.ListenAddrStrings(
 				fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port),      // regular tcp connections
@@ -129,11 +130,11 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 			),
 			libp2p.Security(libp2ptls.ID, libp2ptls.New),
 			libp2p.Security(noise.ID, noise.New),
-			libp2p.Security(secio.ID, secio.New),
 			libp2p.Transport(libp2pquic.NewTransport),
 			libp2p.Peerstore(peerstore),
 			libp2p.DefaultTransports,
 			libp2p.UserAgent("ipfscrawl"),
+			//			libp2p.ConnectionManager(connman),
 		)
 		if err == nil {
 			return myhost

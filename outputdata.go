@@ -52,6 +52,16 @@ func NewOutputdata(n string, period int64) Outputdata {
 	}
 }
 
+// NewOutputdata creates a new outputdata
+func NewOutputdataSimple(n string, period int64) Outputdata {
+	return Outputdata{
+		n:                 n,
+		period:            period,
+		flush_after_write: true,
+		gzip:              false,
+	}
+}
+
 // Write some data...
 func (od *Outputdata) WriteData(d string) (int, error) {
 	od.mu.Lock()

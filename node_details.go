@@ -5,11 +5,13 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	peerstore "github.com/libp2p/go-libp2p-core/peerstore"
 )
 
 const (
-	MaxNumConnectFailures       = 16
-	DelayConnectAttemptDuration = 2 * time.Minute
+	MaxNumConnectFailures       = 2
+	DelayConnectAttemptDuration = 5 * time.Minute
 	DelayReconnectDuration      = 1 * time.Hour
 )
 
@@ -25,20 +27,23 @@ type NodeInfo struct {
 
 // NodeDetails contains info about lots of nodes
 type NodeDetails struct {
-	allIDs []string
-	nodes  map[string]*NodeInfo
-	mutex  sync.Mutex
+	maxSize   int
+	allIDs    []string
+	nodes     map[string]*NodeInfo
+	mutex     sync.Mutex
+	peerstore peerstore.Peerstore
 }
 
 // NewNodeDetails makes a new NodeDetails
-func NewNodeDetails() *NodeDetails {
+func NewNodeDetails(peerstore peerstore.Peerstore, maxSize int) *NodeDetails {
 	nd := &NodeDetails{}
 	nd.nodes = make(map[string]*NodeInfo)
+	nd.peerstore = peerstore
+	nd.maxSize = maxSize
 	return nd
 }
 
-// Stats gets some interesting stats
-func (nd *NodeDetails) Stats() string {
+func (nd *NodeDetails) GetStats() (int, int, int, int, float64) {
 	nd.mutex.Lock()
 	defer nd.mutex.Unlock()
 	total_nodes := 0
@@ -66,6 +71,13 @@ func (nd *NodeDetails) Stats() string {
 
 	avg_since := total_sinceconnect.Seconds() / float64(total_nodes)
 
+	return total_nodes, total_ready, total_expired, total_connected, avg_since
+}
+
+// Stats gets some interesting stats
+func (nd *NodeDetails) Stats() string {
+	total_nodes, total_ready, total_expired, total_connected, avg_since := nd.GetStats()
+
 	return fmt.Sprintf("NodeDetails nodes=%d connected=%d ready=%d expired=%d avg_since=%.0f seconds\n",
 		total_nodes,
 		total_connected,
@@ -80,6 +92,25 @@ func (nd *NodeDetails) Add(id string) {
 	defer nd.mutex.Unlock()
 	_, ok := nd.nodes[id]
 	if !ok {
+		// Do we need to find one to remove?
+		if len(nd.nodes) == nd.maxSize {
+			// TODO: Find a good candidate to remove
+
+			// For now, make it random...
+			i := rand.Intn(len(nd.allIDs))
+			id := nd.allIDs[i]
+			delete(nd.nodes, id)
+			for i, val := range nd.allIDs {
+				if val == id {
+					nd.allIDs[i] = nd.allIDs[len(nd.allIDs)-1]
+					nd.allIDs = nd.allIDs[:len(nd.allIDs)-1]
+					break
+				}
+			}
+			//			pid, _ := peer.IDFromString(id)
+			//			nd.peerstore.RemovePeer(pid)
+		}
+
 		now := time.Now()
 		info := &NodeInfo{
 			id:                        id,
@@ -108,6 +139,8 @@ func (nd *NodeDetails) Remove(id string) {
 				break
 			}
 		}
+		//		pid, _ := peer.IDFromString(id)
+		//		nd.peerstore.RemovePeer(pid)
 	}
 }
 
@@ -189,7 +222,7 @@ func readyForConnect(ni *NodeInfo) bool {
 }
 
 func shouldExpire(ni *NodeInfo) bool {
-	if ni.numConnectFailures > MaxNumConnectFailures {
+	if ni.numConnectFailures >= MaxNumConnectFailures {
 		return true
 	}
 	return false

@@ -19,8 +19,10 @@ Reads put=0 get=0 addprov=126 getprov=153 find_node=46438 ping=9044
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,10 +32,9 @@ import (
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-msgio"
 	"github.com/multiformats/go-multiaddr"
-
-	peerstore "github.com/libp2p/go-libp2p-peerstore"
 
 	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	mh "github.com/multiformats/go-multihash"
@@ -58,6 +59,8 @@ type DHT struct {
 	nodedetails NodeDetails
 
 	target_connections int
+	max_connections    int
+	target_peerstore   int
 
 	peerstore peerstore.Peerstore
 	hosts     []host.Host
@@ -95,6 +98,7 @@ type DHT struct {
 	log_peer_ids       Outputdata
 	log_sessions_r     Outputdata
 	log_sessions_w     Outputdata
+	log_stats          Outputdata
 
 	mu          sync.Mutex
 	activePeers map[string]bool
@@ -105,8 +109,9 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
-		nodedetails:        *NewNodeDetails(),
-		target_connections: 1000,
+		nodedetails:        *NewNodeDetails(peerstore, 10000),
+		target_connections: 2400,
+		max_connections:    3600,
 		peerstore:          peerstore,
 		hosts:              hosts,
 		started:            time.Now(),
@@ -123,9 +128,28 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		log_put_pk:         NewOutputdata("put_pk", output_file_period),
 		log_sessions_r:     NewOutputdata("sessions_r", output_file_period),
 		log_sessions_w:     NewOutputdata("sessions_w", output_file_period),
+		log_stats:          NewOutputdataSimple("stats", output_file_period),
 		activePeers:        make(map[string]bool),
 	}
+	/*
+		for _, host := range hosts {
+			host.Network().Notify(&network.NotifyBundle{
+				ConnectedF: func(n network.Network, c network.Conn) {
+					fmt.Printf("Connected %s\n", c)
+				},
+				DisconnectedF: func(n network.Network, c network.Conn) {
+					fmt.Printf("Disconnected %s\n", c)
+				},
+				OpenedStreamF: func(n network.Network, s network.Stream) {
+					fmt.Printf("Stream open %s\n", s)
+				},
+				ClosedStreamF: func(n network.Network, s network.Stream) {
+					fmt.Printf("Stream close %s\n", s)
+				},
+			})
 
+		}
+	*/
 	// Set it up to handle incoming streams of the correct protocol
 	for _, host := range hosts {
 		host.SetStreamHandler(proto, dht.handleNewStream)
@@ -178,13 +202,14 @@ func (dht *DHT) ReplaceHost(host host.Host) {
 	dht.hosts[i] = host
 }
 
-// ShowStats - print out some stats about our crawl
-func (dht *DHT) ShowStats() {
-	// How many connections do we have?, how many streams?
+// CurrentStreams - get number of current streams
+func (dht *DHT) CurrentStreams() (int, int, int, int, int) {
 	total_connections := 0
 	total_streams := 0
 	total_dht_streams := 0
-	total_peerstore := dht.peerstore.Peers().Len()
+
+	total_in_dht_streams := 0
+	total_out_dht_streams := 0
 
 	for _, host := range dht.hosts {
 		cons := host.Network().Conns()
@@ -195,17 +220,34 @@ func (dht *DHT) ShowStats() {
 			for _, stream := range con.GetStreams() {
 				if stream.Protocol() == proto {
 					total_dht_streams++
+					stats := stream.Stat()
+					if stats.Direction == network.DirInbound {
+						total_in_dht_streams++
+					} else {
+						total_out_dht_streams++
+					}
 				}
 			}
 		}
 	}
+	return total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams
+}
+
+// ShowStats - print out some stats about our crawl
+func (dht *DHT) ShowStats() {
+	// How many connections do we have?, how many streams?
+	total_peerstore := dht.peerstore.Peers().Len()
+
+	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams := dht.CurrentStreams()
 
 	fmt.Printf("DHT uptime=%.2fs total_peers_found=%d\n", time.Since(dht.started).Seconds(), dht.metric_peers_found)
-	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d peerstore=%d\n",
+	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d (%d in %d out) peerstore=%d\n",
 		len(dht.hosts),
 		total_connections,
 		total_streams,
 		total_dht_streams,
+		total_in_dht_streams,
+		total_out_dht_streams,
 		total_peerstore)
 	fmt.Printf("Total Connections out=%d (%d fails) (%d rejected) in=%d (%d rejected)\n",
 		dht.metric_con_outgoing_success,
@@ -228,7 +270,29 @@ func (dht *DHT) ShowStats() {
 
 	fmt.Printf(dht.nodedetails.Stats())
 
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	fmt.Printf("Memory Alloc = %v MiB", m.Alloc/(1024*1024))
+	fmt.Printf(" TotalAlloc = %v MiB", m.TotalAlloc/(1024*1024))
+	fmt.Printf(" Sys = %v MiB", m.Sys/(1024*1024))
+	fmt.Printf(" NumGC = %v\n", m.NumGC)
+
 	fmt.Println()
+
+	total_nodes, total_ready, total_expired, total_connected, avg_since := dht.nodedetails.GetStats()
+
+	// Also write it to a stats file...
+	// NumGC, Allo, Sys,
+	s := fmt.Sprintf("%v,%v,%v, %d,%d,%d,%d,%d,%d, %d,%d,%d,%d,%.2f",
+		m.NumGC, m.Alloc/(1024*1024), m.Sys/(1024*1024),
+		total_connections, total_streams, total_dht_streams,
+		total_in_dht_streams, total_out_dht_streams, total_peerstore,
+		total_nodes, total_ready, total_expired, total_connected, avg_since,
+	)
+
+	dht.log_stats.WriteData(s)
+
 }
 
 // Connect connects to a new peer, and starts an eventloop for it
@@ -237,14 +301,19 @@ func (dht *DHT) Connect(id peer.ID) error {
 	//	fmt.Printf("Outgoing [%s]\n", id.Pretty())
 
 	dht.nodedetails.Add(id.Pretty())
-	/*
-		FOR NOW...
 
+	_, _, total_dht_streams, _, _ := dht.CurrentStreams()
+	if total_dht_streams >= dht.target_connections {
+		if total_dht_streams >= dht.max_connections {
+			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
+			return errors.New("No capacity")
+		}
 		if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
 			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
 			return errors.New("Dupe")
 		}
-	*/
+	}
+
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
 
@@ -270,15 +339,26 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 
 	//	fmt.Printf("Incoming [%s]\n", pid.Pretty())
 
-	// Check if we should reject it
 	dht.nodedetails.Add(pid.Pretty())
-	/*
+
+	// If we have enough connections, check if we should reject it
+	_, _, total_dht_streams, _, _ := dht.CurrentStreams()
+	if total_dht_streams >= dht.target_connections {
+		if total_dht_streams >= dht.max_connections {
+			atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
+			s.Close()
+			s.Conn().Close()
+			return
+		}
+
 		if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
 			atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
 			s.Close()
+			s.Conn().Close()
 			return
 		}
-	*/
+	}
+
 	// Handle it...
 	dht.nodedetails.ConnectSuccess(pid.Pretty())
 	dht.nodedetails.Connected(pid.Pretty())
@@ -381,7 +461,10 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 	defer cancelFunc()
 
 	// Close the stream in the reader only...
-	defer s.Close()
+	defer func() {
+		s.Close()
+		s.Conn().Close()
+	}()
 
 	defer dht.nodedetails.Disconnected(peerID)
 
@@ -513,7 +596,7 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 					ad, err := multiaddr.NewMultiaddrBytes(a)
 					if err == nil && isConnectable(ad) {
 
-						dht.peerstore.AddAddr(pid, ad, 12*time.Hour)
+						dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
 
 						// localPeerID, fromPeerID, newPeerID, addr
 						s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
