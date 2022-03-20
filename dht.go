@@ -1,22 +1,5 @@
 package main
 
-/*
-DHT uptime=55201.76s active=21010 total_peers_found=27123493
-Current Hosts cons=5196 streams=13378 peerstore=45215
-Total Connections out=167291 (20725 fails) (26935482 dupes) in=1464232
-Total Writes ping=1370331 find_node=4863266
-Active writers=274 readers=285
-Reads put=1440 get=334 addprov=82496 getprov=678241 find_node=2080983 ping=402829
-
-DHT uptime=170.79s active=12320 total_peers_found=793884
-Current Hosts cons=9377 streams=10303 peerstore=13308
-Total Connections out=15999 (2971 fails) (774268 dupes) in=2553
-Total Writes ping=22348 find_node=83410
-Active writers=8176 readers=9122
-Reads put=0 get=0 addprov=126 getprov=153 find_node=46438 ping=9044
-
-*/
-
 import (
 	"context"
 	"errors"
@@ -35,6 +18,9 @@ import (
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/libp2p/go-msgio"
 	"github.com/multiformats/go-multiaddr"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	mh "github.com/multiformats/go-multihash"
@@ -55,6 +41,98 @@ const (
 	proto = "/ipfs/kad/1.0.0"
 )
 
+const CONNECTION_MAX_TIME = 1 * time.Minute
+const MAX_CONNECTIONS = 10000
+const TARGET_CONNECTIONS = 8000
+
+var (
+	p_con_outgoing_fail = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_con_outgoing_fail", Help: ""})
+	p_con_outgoing_success = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_con_outgoing_success", Help: ""})
+	p_con_outgoing_rejected = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_con_outgoing_rejected", Help: ""})
+	p_con_incoming = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_con_incoming", Help: ""})
+	p_con_incoming_rejected = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_con_incoming_rejected", Help: ""})
+	p_written_ping = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_written_ping", Help: ""})
+	p_written_find_node = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_written_find_node", Help: ""})
+
+	p_read_put_value = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_read_put_value", Help: ""})
+	p_read_get_value = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_read_get_value", Help: ""})
+	p_read_add_provider = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_read_add_provider", Help: ""})
+	p_read_get_provider = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_read_get_provider", Help: ""})
+	p_read_find_node = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_read_find_node", Help: ""})
+	p_read_ping = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_read_ping", Help: ""})
+	p_peers_found = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_peers_found", Help: ""})
+	p_active_writers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_active_writers", Help: ""})
+	p_active_readers = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_active_readers", Help: ""})
+
+	p_max_connections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_max_connections", Help: ""})
+	p_target_connections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_target_connections", Help: ""})
+
+	p_ns_total_connections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_ns_total_connections", Help: ""})
+	p_ns_total_streams = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_ns_total_streams", Help: ""})
+	p_ns_total_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_ns_total_dht_streams", Help: ""})
+	p_ns_total_in_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_ns_total_in_dht_streams", Help: ""})
+	p_ns_total_out_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_ns_total_out_dht_streams", Help: ""})
+)
+
+// Update prometheus stats
+func (dht *DHT) UpdateStats() {
+	fmt.Printf("Updating prom stats...\n")
+	p_con_outgoing_fail.Set(float64(dht.metric_con_outgoing_fail))
+	p_con_outgoing_success.Set(float64(dht.metric_con_outgoing_success))
+	p_con_outgoing_rejected.Set(float64(dht.metric_con_outgoing_rejected))
+	p_con_incoming.Set(float64(dht.metric_con_incoming))
+	p_con_incoming_rejected.Set(float64(dht.metric_con_incoming_rejected))
+
+	p_written_ping.Set(float64(dht.metric_written_ping))
+	p_written_find_node.Set(float64(dht.metric_written_find_node))
+
+	p_read_put_value.Set(float64(dht.metric_read_put_value))
+	p_read_get_value.Set(float64(dht.metric_read_get_value))
+	p_read_add_provider.Set(float64(dht.metric_read_add_provider))
+	p_read_get_provider.Set(float64(dht.metric_read_get_provider))
+	p_read_find_node.Set(float64(dht.metric_read_find_node))
+	p_read_ping.Set(float64(dht.metric_read_ping))
+
+	p_peers_found.Set(float64(dht.metric_peers_found))
+
+	p_active_writers.Set(float64(dht.metric_active_writers))
+	p_active_readers.Set(float64(dht.metric_active_readers))
+
+	p_target_connections.Set(float64(dht.target_connections))
+	p_max_connections.Set(float64(dht.max_connections))
+
+	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams := dht.CurrentStreams()
+	p_ns_total_connections.Set(float64(total_connections))
+	p_ns_total_streams.Set(float64(total_streams))
+	p_ns_total_dht_streams.Set(float64(total_dht_streams))
+	p_ns_total_in_dht_streams.Set(float64(total_in_dht_streams))
+	p_ns_total_out_dht_streams.Set(float64(total_out_dht_streams))
+
+}
+
 type DHT struct {
 	nodedetails NodeDetails
 
@@ -62,6 +140,7 @@ type DHT struct {
 	max_connections    int
 	target_peerstore   int
 
+	hostmu    sync.Mutex
 	peerstore peerstore.Peerstore
 	hosts     []host.Host
 
@@ -99,9 +178,6 @@ type DHT struct {
 	log_sessions_r     Outputdata
 	log_sessions_w     Outputdata
 	log_stats          Outputdata
-
-	mu          sync.Mutex
-	activePeers map[string]bool
 }
 
 // NewDHT creates a new DHT on top of the given hosts
@@ -109,11 +185,10 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
-		nodedetails:        *NewNodeDetails(peerstore, 10000),
-		target_connections: 2400,
-		max_connections:    3600,
-		peerstore:          peerstore,
-		hosts:              hosts,
+		nodedetails:        *NewNodeDetails(10000),
+		target_connections: TARGET_CONNECTIONS,
+		max_connections:    MAX_CONNECTIONS,
+		hosts:              make([]host.Host, 0),
 		started:            time.Now(),
 		log_peerinfo:       NewOutputdata("peerinfo", output_file_period),
 		log_peer_protocols: NewOutputdata("peerprotocols", output_file_period),
@@ -129,30 +204,6 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		log_sessions_r:     NewOutputdata("sessions_r", output_file_period),
 		log_sessions_w:     NewOutputdata("sessions_w", output_file_period),
 		log_stats:          NewOutputdataSimple("stats", output_file_period),
-		activePeers:        make(map[string]bool),
-	}
-	/*
-		for _, host := range hosts {
-			host.Network().Notify(&network.NotifyBundle{
-				ConnectedF: func(n network.Network, c network.Conn) {
-					fmt.Printf("Connected %s\n", c)
-				},
-				DisconnectedF: func(n network.Network, c network.Conn) {
-					fmt.Printf("Disconnected %s\n", c)
-				},
-				OpenedStreamF: func(n network.Network, s network.Stream) {
-					fmt.Printf("Stream open %s\n", s)
-				},
-				ClosedStreamF: func(n network.Network, s network.Stream) {
-					fmt.Printf("Stream close %s\n", s)
-				},
-			})
-
-		}
-	*/
-	// Set it up to handle incoming streams of the correct protocol
-	for _, host := range hosts {
-		host.SetStreamHandler(proto, dht.handleNewStream)
 	}
 
 	// Start something to try keep us alive...
@@ -160,6 +211,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		for {
 			// Check if we should top us up...
 			total_dht_streams := 0
+			dht.hostmu.Lock()
 			for _, host := range dht.hosts {
 				cons := host.Network().Conns()
 				for _, con := range cons {
@@ -170,6 +222,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 					}
 				}
 			}
+			dht.hostmu.Unlock()
 
 			if total_dht_streams < dht.target_connections {
 				// Find something to connect to
@@ -187,23 +240,40 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		}
 	}()
 
+	dht.SetHosts(peerstore, hosts)
+
 	return dht
 }
 
-// ReplaceHost replaces one of our hosts with a new fresh clean one
-func (dht *DHT) ReplaceHost(host host.Host) {
-	i := rand.Intn(len(dht.hosts))
-	// First we need to close the old one
-	fmt.Printf("CLOSING HOST %s\n", dht.hosts[i].ID().Pretty())
-	dht.hosts[i].Close()
+func (dht *DHT) SetHosts(peerstore peerstore.Peerstore, hosts []host.Host) {
+	dht.hostmu.Lock()
+	defer dht.hostmu.Unlock()
 
-	// Now replace it with the new one...
-	host.SetStreamHandler(proto, dht.handleNewStream)
-	dht.hosts[i] = host
+	// If we have existing hosts, close them all
+	go func(oldhosts []host.Host) {
+		fmt.Printf("Closing hosts [%d]\n", len(oldhosts))
+		for i, host := range oldhosts {
+			fmt.Printf("Closing host %d\n", i)
+			host.Close()
+		}
+	}(dht.hosts)
+
+	fmt.Printf("Setting up new hosts and peerstore\n")
+	// Setup hosts + peerstore
+	dht.peerstore = peerstore
+	dht.hosts = hosts
+
+	// Set it up to handle incoming streams of the correct protocol
+	for _, host := range hosts {
+		host.SetStreamHandler(proto, dht.handleNewStream)
+	}
 }
 
 // CurrentStreams - get number of current streams
 func (dht *DHT) CurrentStreams() (int, int, int, int, int) {
+	dht.hostmu.Lock()
+	defer dht.hostmu.Unlock()
+
 	total_connections := 0
 	total_streams := 0
 	total_dht_streams := 0
@@ -236,13 +306,16 @@ func (dht *DHT) CurrentStreams() (int, int, int, int, int) {
 // ShowStats - print out some stats about our crawl
 func (dht *DHT) ShowStats() {
 	// How many connections do we have?, how many streams?
+	dht.hostmu.Lock()
 	total_peerstore := dht.peerstore.Peers().Len()
+	num_hosts := len(dht.hosts)
+	dht.hostmu.Unlock()
 
 	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams := dht.CurrentStreams()
 
 	fmt.Printf("DHT uptime=%.2fs total_peers_found=%d\n", time.Since(dht.started).Seconds(), dht.metric_peers_found)
 	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d (%d in %d out) peerstore=%d\n",
-		len(dht.hosts),
+		num_hosts,
 		total_connections,
 		total_streams,
 		total_dht_streams,
@@ -302,7 +375,9 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 	dht.nodedetails.Add(id.Pretty())
 
-	_, _, total_dht_streams, _, _ := dht.CurrentStreams()
+	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_readers))
+
+	//_, _, total_dht_streams, _, _ := dht.CurrentStreams()
 	if total_dht_streams >= dht.target_connections {
 		if total_dht_streams >= dht.max_connections {
 			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
@@ -315,9 +390,11 @@ func (dht *DHT) Connect(id peer.ID) error {
 	}
 
 	// Pick a host at random...
+	dht.hostmu.Lock()
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
+	dht.hostmu.Unlock()
 
-	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 
 	s, err := host.NewStream(ctx, id, proto)
 	if err != nil {
@@ -338,11 +415,12 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
 
 	//	fmt.Printf("Incoming [%s]\n", pid.Pretty())
-
 	dht.nodedetails.Add(pid.Pretty())
 
 	// If we have enough connections, check if we should reject it
-	_, _, total_dht_streams, _, _ := dht.CurrentStreams()
+	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_readers))
+
+	//_, _, total_dht_streams, _, _ := dht.CurrentStreams()
 	if total_dht_streams >= dht.target_connections {
 		if total_dht_streams >= dht.max_connections {
 			atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
@@ -364,7 +442,7 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	dht.nodedetails.Connected(pid.Pretty())
 
 	atomic.AddUint64(&dht.metric_con_incoming, 1)
-	ctx, cancelFunc := context.WithTimeout(context.TODO(), 10*time.Minute)
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 	dht.ProcessPeerStream(ctx, cancelFunc, s)
 }
 
@@ -388,6 +466,14 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 	}()
 
 	defer cancelFunc()
+
+	// Close the stream in the writer only...
+	defer func() {
+		s.Close()
+		s.Conn().Close()
+	}()
+
+	defer dht.nodedetails.Disconnected(peerID)
 
 	w := msgio.NewVarintWriter(s)
 
@@ -460,14 +546,6 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 	defer cancelFunc()
 
-	// Close the stream in the reader only...
-	defer func() {
-		s.Close()
-		s.Conn().Close()
-	}()
-
-	defer dht.nodedetails.Disconnected(peerID)
-
 	r := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
 
 	for {
@@ -479,6 +557,7 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 		}
 
 		var req pb.Message
+
 		msgbytes, err := r.ReadMsg()
 		if err != nil {
 			return
@@ -596,7 +675,9 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 					ad, err := multiaddr.NewMultiaddrBytes(a)
 					if err == nil && isConnectable(ad) {
 
+						dht.hostmu.Lock()
 						dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
+						dht.hostmu.Unlock()
 
 						// localPeerID, fromPeerID, newPeerID, addr
 						s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
@@ -661,17 +742,20 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 
 // WritePeerInfo - write some data from our peerstore for pid
 func (dht *DHT) WritePeerInfo(pid peer.ID) {
+	dht.hostmu.Lock()
 	// Find out some info about the peer...
-	protocols, err := dht.peerstore.GetProtocols(pid)
-	if err == nil {
+	protocols, protoerr := dht.peerstore.GetProtocols(pid)
+	agent, agenterr := dht.peerstore.Get(pid, "AgentVersion")
+	dht.hostmu.Unlock()
+
+	if protoerr == nil {
 		for _, proto := range protocols {
 			s := fmt.Sprintf("%s,%s", pid.Pretty(), proto)
 			dht.log_peer_protocols.WriteData(s)
 		}
 	}
 
-	agent, err := dht.peerstore.Get(pid, "AgentVersion")
-	if err == nil {
+	if agenterr == nil {
 		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
 		dht.log_peer_agents.WriteData(s)
 	}

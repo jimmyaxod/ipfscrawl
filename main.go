@@ -19,11 +19,9 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
-	noise "github.com/libp2p/go-libp2p-noise"
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
-	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
-	libp2ptls "github.com/libp2p/go-libp2p-tls"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"net/http"
 	_ "net/http/pprof"
@@ -34,22 +32,27 @@ import (
 // https://cloudflare-ipfs.com/ipns/12D3KooWSPahV81xHimuUKrwNnonYgVrDMs1JtqmT3B12zsY5F6f
 // https://cloudflare-ipfs.com/ipfs/QmTenMnimYgzfX96qdu1kHka1S68v9PxXi8pgHd29tJywT
 
+const PROMETHEUS_PORT = 2112
+
 func main() {
 	useDefaultBootstrap := flag.Bool("defaultbootstrap", false, "Use default bootstrap servers")
 	bootstrap := flag.String("bootstrap", "", "Node to bootstrap from")
 	NUM_HOSTS := flag.Int("hosts", 12, "Number of hosts to have running")
 	flag.Parse()
 
+	http.Handle("/metrics", promhttp.Handler())
+	go http.ListenAndServe(fmt.Sprintf(":%d", PROMETHEUS_PORT), nil)
+
+	fmt.Printf("Listening on port %d...\n", PROMETHEUS_PORT)
+
 	// So we can see pprof info
-	go http.ListenAndServe("0.0.0.0:8080", nil)
+	//go http.ListenAndServe("0.0.0.0:8080", nil)
 
 	ctx := context.TODO()
 
 	hosts := make([]host.Host, *NUM_HOSTS)
 
 	peerstore, _ := pstoremem.NewPeerstore()
-
-	//	connman, _ := connmgr.NewConnManager(2400, 3200)
 
 	for i := 0; i < len(hosts); i++ {
 		hosts[i] = createHost(ctx, peerstore)
@@ -72,10 +75,12 @@ func main() {
 			for _, a := range addr.Addrs {
 				fmt.Printf("Bootstrap %s %s\n", addr.ID, a)
 			}
-			dhtc.peerstore.AddAddrs(addr.ID, addr.Addrs, time.Hour)
+			peerstore.AddAddrs(addr.ID, addr.Addrs, 12*time.Hour)
 			dhtc.Connect(addr.ID)
 		}
 	}
+
+	fmt.Printf("Going into stats loop...\n")
 
 	ticker_stats := time.NewTicker(10 * time.Second)
 	//	ticker_nuke_host := time.NewTicker(10 * time.Minute)
@@ -84,10 +89,19 @@ func main() {
 		select {
 		case <-ticker_stats.C:
 			dhtc.ShowStats()
-			//		case <-ticker_nuke_host.C:
-			// Create a new host, and replace it...
-			//			myhost := createHost(ctx, peerstore)
-			//			dhtc.ReplaceHost(myhost)
+			dhtc.UpdateStats()
+			/*
+				case <-ticker_nuke_host.C:
+					// Create a new peerstore and new hosts, and replace it all...
+					hosts := make([]host.Host, *NUM_HOSTS)
+					peerstore, _ := pstoremem.NewPeerstore()
+
+					for i := 0; i < len(hosts); i++ {
+						hosts[i] = createHost(ctx, peerstore)
+					}
+
+					dhtc.SetHosts(peerstore, hosts)
+			*/
 		}
 	}
 
@@ -128,17 +142,16 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 				fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic", port), // a UDP endpoint for the QUIC transport
 				fmt.Sprintf("/ip6/::/udp/%d/quic", port),      // a UDP endpoint for the QUIC transport
 			),
-			libp2p.Security(libp2ptls.ID, libp2ptls.New),
-			libp2p.Security(noise.ID, noise.New),
-			libp2p.Transport(libp2pquic.NewTransport),
+			//			libp2p.Security(libp2ptls.ID, libp2ptls.New),
+			//			libp2p.Security(noise.ID, noise.New),
 			libp2p.Peerstore(peerstore),
-			libp2p.DefaultTransports,
+			//			libp2p.DefaultTransports,
 			libp2p.UserAgent("ipfscrawl"),
 			//			libp2p.ConnectionManager(connman),
 		)
 		if err == nil {
 			return myhost
 		}
-		fmt.Printf("Finding free port...\n")
+		fmt.Printf("Finding free port... %v \n", err)
 	}
 }
