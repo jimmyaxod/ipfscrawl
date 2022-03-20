@@ -114,6 +114,7 @@ func (nd *NodeDetails) Add(id string) {
 			numConnectFailures:        0,
 			connected:                 false,
 		}
+
 		nd.allIDs = append(nd.allIDs, id)
 		nd.nodes[id] = info
 	}

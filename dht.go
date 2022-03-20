@@ -41,11 +41,15 @@ const (
 	proto = "/ipfs/kad/1.0.0"
 )
 
-const CONNECTION_MAX_TIME = 1 * time.Minute
-const MAX_CONNECTIONS = 10000
-const TARGET_CONNECTIONS = 8000
+const CONNECTION_MAX_TIME = 5 * time.Minute
+const MAX_CONNECTIONS = 1200
+const TARGET_CONNECTIONS = 1024
+const MAX_NODE_DETAILS = 100000
 
 var (
+	p_pending_connects = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_pending_connects", Help: ""})
+
 	p_con_outgoing_fail = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_con_outgoing_fail", Help: ""})
 	p_con_outgoing_success = promauto.NewGauge(prometheus.GaugeOpts{
@@ -95,6 +99,17 @@ var (
 		Name: "dht_ns_total_in_dht_streams", Help: ""})
 	p_ns_total_out_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_ns_total_out_dht_streams", Help: ""})
+
+	p_nd_total_nodes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_nodes", Help: ""})
+	p_nd_total_ready = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_ready", Help: ""})
+	p_nd_total_expired = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_expired", Help: ""})
+	p_nd_total_connected = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_connected", Help: ""})
+	p_nd_avg_since = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_avg_since", Help: ""})
 )
 
 // Update prometheus stats
@@ -131,6 +146,15 @@ func (dht *DHT) UpdateStats() {
 	p_ns_total_in_dht_streams.Set(float64(total_in_dht_streams))
 	p_ns_total_out_dht_streams.Set(float64(total_out_dht_streams))
 
+	total_nodes, total_ready, total_expired, total_connected, avg_since := dht.nodedetails.GetStats()
+
+	p_nd_total_nodes.Set(float64(total_nodes))
+	p_nd_total_ready.Set(float64(total_ready))
+	p_nd_total_expired.Set(float64(total_expired))
+	p_nd_total_connected.Set(float64(total_connected))
+	p_nd_avg_since.Set(float64(avg_since))
+
+	p_pending_connects.Set(float64(dht.metric_pending_connect))
 }
 
 type DHT struct {
@@ -146,6 +170,7 @@ type DHT struct {
 
 	started time.Time
 
+	metric_pending_connect       int64
 	metric_con_outgoing_fail     uint64
 	metric_con_outgoing_success  uint64
 	metric_con_outgoing_rejected uint64
@@ -185,7 +210,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
-		nodedetails:        *NewNodeDetails(10000),
+		nodedetails:        *NewNodeDetails(MAX_NODE_DETAILS),
 		target_connections: TARGET_CONNECTIONS,
 		max_connections:    MAX_CONNECTIONS,
 		hosts:              make([]host.Host, 0),
@@ -209,21 +234,26 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	// Start something to try keep us alive...
 	go func() {
 		for {
+			total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_readers))
+
+			total_dht_streams += int(atomic.LoadInt64(&dht.metric_pending_connect))
+
 			// Check if we should top us up...
-			total_dht_streams := 0
-			dht.hostmu.Lock()
-			for _, host := range dht.hosts {
-				cons := host.Network().Conns()
-				for _, con := range cons {
-					for _, stream := range con.GetStreams() {
-						if stream.Protocol() == proto {
-							total_dht_streams++
+			/*
+				total_dht_streams := 0
+				dht.hostmu.Lock()
+				for _, host := range dht.hosts {
+					cons := host.Network().Conns()
+					for _, con := range cons {
+						for _, stream := range con.GetStreams() {
+							if stream.Protocol() == proto {
+								total_dht_streams++
+							}
 						}
 					}
 				}
-			}
-			dht.hostmu.Unlock()
-
+				dht.hostmu.Unlock()
+			*/
 			if total_dht_streams < dht.target_connections {
 				// Find something to connect to
 				p := dht.nodedetails.Get()
@@ -372,6 +402,11 @@ func (dht *DHT) ShowStats() {
 // Assumes that tryConnectTo has already been called...
 func (dht *DHT) Connect(id peer.ID) error {
 	//	fmt.Printf("Outgoing [%s]\n", id.Pretty())
+
+	atomic.AddInt64(&dht.metric_pending_connect, 1)
+	defer func() {
+		atomic.AddInt64(&dht.metric_pending_connect, -1)
+	}()
 
 	dht.nodedetails.Add(id.Pretty())
 
