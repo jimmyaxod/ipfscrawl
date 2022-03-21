@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -42,9 +45,19 @@ const (
 )
 
 const CONNECTION_MAX_TIME = 5 * time.Minute
-const MAX_CONNECTIONS = 1200
-const TARGET_CONNECTIONS = 1024
-const MAX_NODE_DETAILS = 100000
+
+const MAX_SESSIONS_IN = 120
+const TARGET_SESSIONS_IN = 102
+
+const MAX_SESSIONS_OUT = 1200
+const TARGET_SESSIONS_OUT = 1024
+
+const MAX_NODE_DETAILS = 10000
+
+const PERIOD_SEND_FIND_NODE = 10 * time.Second
+const PERIOD_SEND_PING = 30 * time.Second
+
+const LOG_SESSIONS = false
 
 var (
 	p_pending_connects = promauto.NewGauge(prometheus.GaugeOpts{
@@ -84,11 +97,6 @@ var (
 	p_active_readers = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_active_readers", Help: ""})
 
-	p_max_connections = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_max_connections", Help: ""})
-	p_target_connections = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_target_connections", Help: ""})
-
 	p_ns_total_connections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_ns_total_connections", Help: ""})
 	p_ns_total_streams = promauto.NewGauge(prometheus.GaugeOpts{
@@ -110,6 +118,19 @@ var (
 		Name: "dht_nd_total_connected", Help: ""})
 	p_nd_avg_since = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_nd_avg_since", Help: ""})
+
+	p_total_agents = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "dht_total_agents", Help: ""}, []string{"agent"})
+	p_total_agents_full = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "dht_total_agents_full", Help: ""}, []string{"agent"})
+
+	p_session_total_time = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_session_total_time", Help: ""})
+
+	p_active_sessions_in = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_active_sessions_in", Help: ""})
+	p_active_sessions_out = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_active_sessions_out", Help: ""})
 )
 
 // Update prometheus stats
@@ -136,9 +157,6 @@ func (dht *DHT) UpdateStats() {
 	p_active_writers.Set(float64(dht.metric_active_writers))
 	p_active_readers.Set(float64(dht.metric_active_readers))
 
-	p_target_connections.Set(float64(dht.target_connections))
-	p_max_connections.Set(float64(dht.max_connections))
-
 	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams := dht.CurrentStreams()
 	p_ns_total_connections.Set(float64(total_connections))
 	p_ns_total_streams.Set(float64(total_streams))
@@ -155,14 +173,20 @@ func (dht *DHT) UpdateStats() {
 	p_nd_avg_since.Set(float64(avg_since))
 
 	p_pending_connects.Set(float64(dht.metric_pending_connect))
+
+	p_active_sessions_in.Set(float64(dht.metric_active_sessions_in))
+	p_active_sessions_out.Set(float64(dht.metric_active_sessions_out))
 }
 
 type DHT struct {
 	nodedetails NodeDetails
 
-	target_connections int
-	max_connections    int
-	target_peerstore   int
+	target_sessions_in  int
+	max_sessions_in     int
+	target_sessions_out int
+	max_sessions_out    int
+
+	target_peerstore int
 
 	hostmu    sync.Mutex
 	peerstore peerstore.Peerstore
@@ -189,6 +213,9 @@ type DHT struct {
 	metric_active_writers int64
 	metric_active_readers int64
 
+	metric_active_sessions_in  int64
+	metric_active_sessions_out int64
+
 	log_peerinfo       Outputdata
 	log_addproviders   Outputdata
 	log_getproviders   Outputdata
@@ -210,31 +237,33 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
-		nodedetails:        *NewNodeDetails(MAX_NODE_DETAILS),
-		target_connections: TARGET_CONNECTIONS,
-		max_connections:    MAX_CONNECTIONS,
-		hosts:              make([]host.Host, 0),
-		started:            time.Now(),
-		log_peerinfo:       NewOutputdata("peerinfo", output_file_period),
-		log_peer_protocols: NewOutputdata("peerprotocols", output_file_period),
-		log_peer_agents:    NewOutputdata("peeragents", output_file_period),
-		log_peer_ids:       NewOutputdata("peerids", output_file_period),
-		log_addproviders:   NewOutputdata("addproviders", output_file_period),
-		log_getproviders:   NewOutputdata("getproviders", output_file_period),
-		log_put:            NewOutputdata("put", output_file_period),
-		log_get:            NewOutputdata("get", output_file_period),
-		log_put_ipns:       NewOutputdata("put_ipns", output_file_period),
-		log_get_ipns:       NewOutputdata("get_ipns", output_file_period),
-		log_put_pk:         NewOutputdata("put_pk", output_file_period),
-		log_sessions_r:     NewOutputdata("sessions_r", output_file_period),
-		log_sessions_w:     NewOutputdata("sessions_w", output_file_period),
-		log_stats:          NewOutputdataSimple("stats", output_file_period),
+		nodedetails:         *NewNodeDetails(MAX_NODE_DETAILS),
+		target_sessions_in:  TARGET_SESSIONS_IN,
+		max_sessions_in:     MAX_SESSIONS_IN,
+		target_sessions_out: TARGET_SESSIONS_OUT,
+		max_sessions_out:    MAX_SESSIONS_OUT,
+		hosts:               make([]host.Host, 0),
+		started:             time.Now(),
+		log_peerinfo:        NewOutputdata("peerinfo", output_file_period),
+		log_peer_protocols:  NewOutputdata("peerprotocols", output_file_period),
+		log_peer_agents:     NewOutputdata("peeragents", output_file_period),
+		log_peer_ids:        NewOutputdata("peerids", output_file_period),
+		log_addproviders:    NewOutputdata("addproviders", output_file_period),
+		log_getproviders:    NewOutputdata("getproviders", output_file_period),
+		log_put:             NewOutputdata("put", output_file_period),
+		log_get:             NewOutputdata("get", output_file_period),
+		log_put_ipns:        NewOutputdata("put_ipns", output_file_period),
+		log_get_ipns:        NewOutputdata("get_ipns", output_file_period),
+		log_put_pk:          NewOutputdata("put_pk", output_file_period),
+		log_sessions_r:      NewOutputdata("sessions_r", output_file_period),
+		log_sessions_w:      NewOutputdata("sessions_w", output_file_period),
+		log_stats:           NewOutputdataSimple("stats", output_file_period),
 	}
 
 	// Start something to try keep us alive...
 	go func() {
 		for {
-			total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_readers))
+			total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_out))
 
 			total_dht_streams += int(atomic.LoadInt64(&dht.metric_pending_connect))
 
@@ -254,7 +283,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 				}
 				dht.hostmu.Unlock()
 			*/
-			if total_dht_streams < dht.target_connections {
+			if total_dht_streams < dht.target_sessions_out {
 				// Find something to connect to
 				p := dht.nodedetails.Get()
 				if p != "" {
@@ -263,6 +292,9 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 						//fmt.Printf("Would try connect to %v\n", targetID)
 						go dht.Connect(targetID)
 					}
+				} else {
+					// Sleep a bit and retry (NOT GOOD)
+					time.Sleep(50 * time.Millisecond)
 				}
 			} else {
 				time.Sleep(100 * time.Millisecond)
@@ -410,11 +442,11 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 	dht.nodedetails.Add(id.Pretty())
 
-	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_readers))
+	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_out))
 
 	//_, _, total_dht_streams, _, _ := dht.CurrentStreams()
-	if total_dht_streams >= dht.target_connections {
-		if total_dht_streams >= dht.max_connections {
+	if total_dht_streams >= dht.target_sessions_out {
+		if total_dht_streams >= dht.max_sessions_out {
 			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
 			return errors.New("No capacity")
 		}
@@ -441,7 +473,7 @@ func (dht *DHT) Connect(id peer.ID) error {
 	dht.nodedetails.Connected(id.Pretty())
 	dht.nodedetails.ConnectSuccess(id.Pretty())
 	atomic.AddUint64(&dht.metric_con_outgoing_success, 1)
-	dht.ProcessPeerStream(ctx, cancelFunc, s)
+	dht.ProcessPeerStream(ctx, cancelFunc, s, false)
 	return nil
 }
 
@@ -453,11 +485,11 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	dht.nodedetails.Add(pid.Pretty())
 
 	// If we have enough connections, check if we should reject it
-	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_readers))
+	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_in))
 
 	//_, _, total_dht_streams, _, _ := dht.CurrentStreams()
-	if total_dht_streams >= dht.target_connections {
-		if total_dht_streams >= dht.max_connections {
+	if total_dht_streams >= dht.target_sessions_in {
+		if total_dht_streams >= dht.max_sessions_in {
 			atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
 			s.Close()
 			s.Conn().Close()
@@ -478,13 +510,19 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 
 	atomic.AddUint64(&dht.metric_con_incoming, 1)
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
-	dht.ProcessPeerStream(ctx, cancelFunc, s)
+	dht.ProcessPeerStream(ctx, cancelFunc, s, true)
 }
 
 // doPeriodicWrites handles sending periodic FIND_NODE and PING
-func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream) {
+func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, slog chan string, donecb func()) {
+	defer donecb()
+
 	peerID := s.Conn().RemotePeer().Pretty()
 	localPeerID := s.Conn().LocalPeer().Pretty()
+
+	if LOG_SESSIONS {
+		slog <- fmt.Sprintf("%s : writer start %s -> %s", time.Now(), localPeerID, peerID)
+	}
 
 	atomic.AddInt64(&dht.metric_active_writers, 1)
 	defer atomic.AddInt64(&dht.metric_active_writers, -1)
@@ -497,7 +535,13 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 		total_duration := etime.Unix() - ctime.Unix()
 		s := fmt.Sprintf("%s,%s,%s,%s,%d,%d", localPeerID, peerID, ctime, etime, total_duration, total_msgs)
 
+		p_session_total_time.Add(float64(total_duration))
+
 		dht.log_sessions_w.WriteData(s)
+		if LOG_SESSIONS {
+
+			slog <- fmt.Sprintf("%d : writer done", int(time.Since(ctime).Seconds()))
+		}
 	}()
 
 	defer cancelFunc()
@@ -512,8 +556,8 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 
 	w := msgio.NewVarintWriter(s)
 
-	ticker_ping := time.NewTicker(30 * time.Second)
-	ticker_find_node := time.NewTicker(10 * time.Second)
+	ticker_ping := time.NewTicker(PERIOD_SEND_PING)
+	ticker_find_node := time.NewTicker(PERIOD_SEND_FIND_NODE)
 
 	for {
 		select {
@@ -533,6 +577,9 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 			}
 			total_msgs++
 			atomic.AddUint64(&dht.metric_written_ping, 1)
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : writer sent ping", int(time.Since(ctime).Seconds()))
+			}
 		case <-ticker_find_node.C:
 			// Send out a find_node for a random key
 
@@ -554,6 +601,9 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 			}
 			total_msgs++
 			atomic.AddUint64(&dht.metric_written_find_node, 1)
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : writer sent find_node", int(time.Since(ctime).Seconds()))
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -561,10 +611,12 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 }
 
 // doReading reads msgs from stream and processes...
-func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream) {
+func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, slog chan string) {
 	peerID := s.Conn().RemotePeer().Pretty()
 	localPeerID := s.Conn().LocalPeer().Pretty()
-
+	if LOG_SESSIONS {
+		slog <- fmt.Sprintf("%s : reader start %s -> %s", time.Now(), localPeerID, peerID)
+	}
 	total_msgs := 0
 	ctime := time.Now()
 
@@ -577,6 +629,9 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 		s := fmt.Sprintf("%s,%s,%s,%s,%d,%d", localPeerID, peerID, ctime, etime, total_duration, total_msgs)
 
 		dht.log_sessions_r.WriteData(s)
+		if LOG_SESSIONS {
+			slog <- fmt.Sprintf("%d : reader done", int(time.Since(ctime).Seconds()))
+		}
 	}()
 
 	defer cancelFunc()
@@ -608,6 +663,9 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 
 		switch req.GetType() {
 		case 0:
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : reader put_value", int(time.Since(ctime).Seconds()))
+			}
 			atomic.AddUint64(&dht.metric_read_put_value, 1)
 
 			rec := req.GetRecord()
@@ -656,6 +714,9 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 			}
 
 		case 1:
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : reader get_value", int(time.Since(ctime).Seconds()))
+			}
 			atomic.AddUint64(&dht.metric_read_get_value, 1)
 
 			s := fmt.Sprintf("%s,%x", peerID, req.GetKey())
@@ -671,6 +732,9 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 				}
 			}
 		case 2:
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : reader add_provider", int(time.Since(ctime).Seconds()))
+			}
 			atomic.AddUint64(&dht.metric_read_add_provider, 1)
 
 			pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
@@ -687,6 +751,9 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 				}
 			}
 		case 3:
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : reader get_provider", int(time.Since(ctime).Seconds()))
+			}
 			atomic.AddUint64(&dht.metric_read_get_provider, 1)
 
 			_, cid, err := cid.CidFromBytes(req.GetKey())
@@ -695,10 +762,16 @@ func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s 
 				dht.log_getproviders.WriteData(s)
 			}
 		case 4:
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : reader find_node", int(time.Since(ctime).Seconds()))
+			}
 			atomic.AddUint64(&dht.metric_read_find_node, 1)
 		case 5:
+			if LOG_SESSIONS {
+				slog <- fmt.Sprintf("%d : reader ping", int(time.Since(ctime).Seconds()))
+			}
 			atomic.AddUint64(&dht.metric_read_ping, 1)
-			// We need to send back a PONG...
+			// We need to send back a PONG?
 		}
 
 		// Check out the FIND_NODE on that!
@@ -763,16 +836,68 @@ func isConnectable(a multiaddr.Multiaddr) bool {
 }
 
 // Process a peer stream
-func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream) {
+func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, isIncoming bool) {
 	pid := s.Conn().RemotePeer()
 
 	dht.WritePeerInfo(pid)
 
+	// TODO: Setup a channel for writes based on reading
+
+	sid := uuid.NewString()
+
+	direction := "out"
+	if isIncoming {
+		direction = "in"
+	}
+
+	if isIncoming {
+		atomic.AddInt64(&dht.metric_active_sessions_in, 1)
+	} else {
+		atomic.AddInt64(&dht.metric_active_sessions_out, 1)
+	}
+
+	sessionDone := func(d *DHT, isIn bool) func() {
+		return func() {
+			if isIn {
+				atomic.AddInt64(&d.metric_active_sessions_in, -1)
+			} else {
+				atomic.AddInt64(&d.metric_active_sessions_out, -1)
+			}
+		}
+	}(dht, isIncoming)
+
+	// Setup channel for session log
+	sessionLog := make(chan string, 0)
+
+	if LOG_SESSIONS {
+		f, err := os.Create(fmt.Sprintf("sessions/%s_%s_%s", direction, pid, sid))
+		if err != nil {
+			panic("Error creating session log!")
+		}
+
+		go func(c context.Context, file *os.File) {
+			fw := bufio.NewWriter(f)
+			// Read sessionLog and write it to a session file...
+			for {
+				select {
+				case logmsg := <-sessionLog:
+					//msg := fmt.Sprintf("Session %s : %s\n", sid, logmsg)
+					fw.WriteString(fmt.Sprintf("%s\n", logmsg))
+					fw.Flush()
+					// TODO: Do I care?
+				case <-c.Done():
+					file.Close()
+					return
+				}
+			}
+
+		}(ctx, f)
+	}
 	// Start something up to periodically FIND_NODE and PING
-	go dht.doPeriodicWrites(ctx, cancelFunc, s)
+	go dht.doPeriodicWrites(ctx, cancelFunc, s, sessionLog, sessionDone)
 
 	// Start something to read messages
-	go dht.doReading(ctx, cancelFunc, s)
+	go dht.doReading(ctx, cancelFunc, s, sessionLog)
 }
 
 // WritePeerInfo - write some data from our peerstore for pid
@@ -793,6 +918,12 @@ func (dht *DHT) WritePeerInfo(pid peer.ID) {
 	if agenterr == nil {
 		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
 		dht.log_peer_agents.WriteData(s)
+
+		ag := fmt.Sprintf("%s", agent)
+		ag_top := strings.Split(ag, "/")[0]
+
+		p_total_agents.With(prometheus.Labels{"agent": ag_top}).Inc()
+		p_total_agents_full.With(prometheus.Labels{"agent": ag}).Inc()
 	}
 
 	decoded, err := mh.Decode([]byte(pid))

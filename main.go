@@ -20,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
+	"github.com/libp2p/go-tcp-transport"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -145,6 +146,7 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 			//			libp2p.Security(libp2ptls.ID, libp2ptls.New),
 			//			libp2p.Security(noise.ID, noise.New),
 			libp2p.Peerstore(peerstore),
+			libp2p.Transport(tcp.NewTCPTransport, tcp.WithConnectionTimeout(10*time.Second)),
 			//			libp2p.DefaultTransports,
 			libp2p.UserAgent("ipfscrawl"),
 			//			libp2p.ConnectionManager(connman),

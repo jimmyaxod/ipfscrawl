@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	MaxNumConnectFailures       = 5
-	DelayConnectAttemptDuration = 5 * time.Minute
-	DelayReconnectDuration      = 1 * time.Hour
+	MaxNumConnectFailures       = 15
+	DelayConnectAttemptDuration = 2 * time.Minute
+	DelayReconnectDuration      = 10 * time.Minute
 )
 
 // NodeInfo contains details about a specific node on the network
