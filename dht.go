@@ -529,33 +529,36 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	dht.ProcessPeerStream(ctx, cancelFunc, s, true)
 }
 
-// doPeriodicWrites handles sending periodic FIND_NODE and PING
-func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, slog chan string, donecb func()) {
-	defer donecb()
+// doReading reads msgs from stream and processes...
+func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, slog chan string, sessionDone func()) {
+	defer sessionDone()
 
 	peerID := s.Conn().RemotePeer().Pretty()
 	localPeerID := s.Conn().LocalPeer().Pretty()
-
 	if LOG_SESSIONS {
-		slog <- fmt.Sprintf("%s : writer start %s -> %s", time.Now(), localPeerID, peerID)
+		slog <- fmt.Sprintf("%s : reader start %s -> %s", time.Now(), localPeerID, peerID)
 	}
+
+	total_msgs_in := 0
+	total_msgs_out := 0
+	ctime := time.Now()
+
+	atomic.AddInt64(&dht.metric_active_readers, 1)
+	defer atomic.AddInt64(&dht.metric_active_readers, -1)
 
 	atomic.AddInt64(&dht.metric_active_writers, 1)
 	defer atomic.AddInt64(&dht.metric_active_writers, -1)
 
-	total_msgs := 0
-	ctime := time.Now()
-
 	defer func() {
 		etime := time.Now()
 		total_duration := etime.Unix() - ctime.Unix()
-		s := fmt.Sprintf("%s,%s,%s,%s,%d,%d", localPeerID, peerID, ctime, etime, total_duration, total_msgs)
+		s := fmt.Sprintf("%s,%s,%s,%s,%d,%d", localPeerID, peerID, ctime, etime, total_duration, total_msgs_in)
 
 		p_session_total_time.Add(float64(total_duration))
 
-		dht.log_sessions_w.WriteData(s)
+		dht.log_sessions_r.WriteData(s)
 		if LOG_SESSIONS {
-			slog <- fmt.Sprintf("%d : writer done", int(time.Since(ctime).Seconds()))
+			slog <- fmt.Sprintf("%d : session done (in %d out %d)", int(time.Since(ctime).Seconds()), total_msgs_in, total_msgs_out)
 		}
 	}()
 
@@ -575,7 +578,10 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 	ticker_find_node := time.NewTicker(PERIOD_SEND_FIND_NODE)
 
 	for {
+		// Check if the context is done...
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker_ping.C:
 			// Send out a ping
 			msg_ping := pb.Message{
@@ -590,7 +596,7 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 			if err != nil {
 				return
 			}
-			total_msgs++
+			total_msgs_out++
 			atomic.AddUint64(&dht.metric_written_ping, 1)
 			if LOG_SESSIONS {
 				slog <- fmt.Sprintf("%d : writer sent ping", int(time.Since(ctime).Seconds()))
@@ -614,204 +620,155 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 			if err != nil {
 				return
 			}
-			total_msgs++
+			total_msgs_out++
 			atomic.AddUint64(&dht.metric_written_find_node, 1)
 			if LOG_SESSIONS {
 				slog <- fmt.Sprintf("%d : writer sent find_node", int(time.Since(ctime).Seconds()))
 			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// doReading reads msgs from stream and processes...
-func (dht *DHT) doReading(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, slog chan string) {
-	peerID := s.Conn().RemotePeer().Pretty()
-	localPeerID := s.Conn().LocalPeer().Pretty()
-	if LOG_SESSIONS {
-		slog <- fmt.Sprintf("%s : reader start %s -> %s", time.Now(), localPeerID, peerID)
-	}
-	total_msgs := 0
-	ctime := time.Now()
-
-	atomic.AddInt64(&dht.metric_active_readers, 1)
-	defer atomic.AddInt64(&dht.metric_active_readers, -1)
-
-	defer func() {
-		etime := time.Now()
-		total_duration := etime.Unix() - ctime.Unix()
-		s := fmt.Sprintf("%s,%s,%s,%s,%d,%d", localPeerID, peerID, ctime, etime, total_duration, total_msgs)
-
-		dht.log_sessions_r.WriteData(s)
-		if LOG_SESSIONS {
-			slog <- fmt.Sprintf("%d : reader done", int(time.Since(ctime).Seconds()))
-		}
-	}()
-
-	defer cancelFunc()
-
-	r := msgio.NewVarintReaderSize(s, network.MessageSizeMax)
-
-	for {
-		// Check if the context is done...
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		var req pb.Message
-
-		msgbytes, err := r.ReadMsg()
-		if err != nil {
-			return
-		}
-
-		err = req.Unmarshal(msgbytes)
-		r.ReleaseMsg(msgbytes)
-		if err != nil {
-			return
-		}
-
-		total_msgs++
-
-		switch req.GetType() {
-		case 0:
-			if LOG_SESSIONS {
-				slog <- fmt.Sprintf("%d : reader put_value", int(time.Since(ctime).Seconds()))
+		case req, ok := <-ses.ReadChannel:
+			if !ok {
+				// Error on read, let's close things up...
+				return
 			}
-			atomic.AddUint64(&dht.metric_read_put_value, 1)
+			total_msgs_in++
 
-			rec := req.GetRecord()
-
-			s := fmt.Sprintf("%s,%x,%x,%x,%s", peerID, req.GetKey(), rec.Key, rec.Value, rec.TimeReceived)
-			dht.log_put.WriteData(s)
-
-			// TODO: /pk/ - maps Hash(pubkey) to pubkey
-
-			if strings.HasPrefix(string(rec.Key), "/pk/") {
-				// Extract the PID...
-				pidbytes := rec.Key[4:]
-				pid, err := peer.IDFromBytes(pidbytes)
-				if err == nil {
-					s := fmt.Sprintf("%s,%s,%x", peerID, pid.Pretty(), rec.Value)
-					dht.log_put_pk.WriteData(s)
+			switch req.GetType() {
+			case 0:
+				if LOG_SESSIONS {
+					slog <- fmt.Sprintf("%d : reader put_value", int(time.Since(ctime).Seconds()))
 				}
-			}
+				atomic.AddUint64(&dht.metric_read_put_value, 1)
 
-			// If it's ipns...
-			if strings.HasPrefix(string(rec.Key), "/ipns/") {
-				// Extract the PID...
-				pidbytes := rec.Key[6:]
-				pid, err := peer.IDFromBytes(pidbytes)
-				if err == nil {
-					// ok so it's an ipns record, so lets examine the data...
-					ipns_rec := ipnspb.IpnsEntry{}
-					err = ipns_rec.Unmarshal(rec.Value)
+				rec := req.GetRecord()
+
+				s := fmt.Sprintf("%s,%x,%x,%x,%s", peerID, req.GetKey(), rec.Key, rec.Value, rec.TimeReceived)
+				dht.log_put.WriteData(s)
+
+				// TODO: /pk/ - maps Hash(pubkey) to pubkey
+
+				if strings.HasPrefix(string(rec.Key), "/pk/") {
+					// Extract the PID...
+					pidbytes := rec.Key[4:]
+					pid, err := peer.IDFromBytes(pidbytes)
 					if err == nil {
-						// Log everything...
-						//pubkey := ipns_rec.GetPubKey()
-						//validity := ipns_rec.GetValidity()
-						//signature := ipns_rec.GetSignature()
-
-						ttl := ipns_rec.GetTtl()
-						seq := ipns_rec.GetSequence()
-						value := ipns_rec.GetValue()
-
-						s := fmt.Sprintf("%s,%s,%s,%d,%d", peerID, pid.Pretty(), string(value), ttl, seq)
-						dht.log_put_ipns.WriteData(s)
-
-					} else {
-						fmt.Printf("Error unmarshalling ipns %v\n", err)
+						s := fmt.Sprintf("%s,%s,%x", peerID, pid.Pretty(), rec.Value)
+						dht.log_put_pk.WriteData(s)
 					}
 				}
-			}
 
-		case 1:
-			if LOG_SESSIONS {
-				slog <- fmt.Sprintf("%d : reader get_value", int(time.Since(ctime).Seconds()))
-			}
-			atomic.AddUint64(&dht.metric_read_get_value, 1)
+				// If it's ipns...
+				if strings.HasPrefix(string(rec.Key), "/ipns/") {
+					// Extract the PID...
+					pidbytes := rec.Key[6:]
+					pid, err := peer.IDFromBytes(pidbytes)
+					if err == nil {
+						// ok so it's an ipns record, so lets examine the data...
+						ipns_rec := ipnspb.IpnsEntry{}
+						err = ipns_rec.Unmarshal(rec.Value)
+						if err == nil {
+							// Log everything...
+							//pubkey := ipns_rec.GetPubKey()
+							//validity := ipns_rec.GetValidity()
+							//signature := ipns_rec.GetSignature()
 
-			s := fmt.Sprintf("%s,%x", peerID, req.GetKey())
-			dht.log_get.WriteData(s)
+							ttl := ipns_rec.GetTtl()
+							seq := ipns_rec.GetSequence()
+							value := ipns_rec.GetValue()
 
-			if strings.HasPrefix(string(req.GetKey()), "/ipns/") {
-				// Extract the PID...
-				pidbytes := req.GetKey()[6:]
-				pid, err := peer.IDFromBytes(pidbytes)
+							s := fmt.Sprintf("%s,%s,%s,%d,%d", peerID, pid.Pretty(), string(value), ttl, seq)
+							dht.log_put_ipns.WriteData(s)
+
+						} else {
+							fmt.Printf("Error unmarshalling ipns %v\n", err)
+						}
+					}
+				}
+
+			case 1:
+				if LOG_SESSIONS {
+					slog <- fmt.Sprintf("%d : reader get_value", int(time.Since(ctime).Seconds()))
+				}
+				atomic.AddUint64(&dht.metric_read_get_value, 1)
+
+				s := fmt.Sprintf("%s,%x", peerID, req.GetKey())
+				dht.log_get.WriteData(s)
+
+				if strings.HasPrefix(string(req.GetKey()), "/ipns/") {
+					// Extract the PID...
+					pidbytes := req.GetKey()[6:]
+					pid, err := peer.IDFromBytes(pidbytes)
+					if err == nil {
+						s := fmt.Sprintf("%s,%s", peerID, pid.Pretty())
+						dht.log_get_ipns.WriteData(s)
+					}
+				}
+			case 2:
+				if LOG_SESSIONS {
+					slog <- fmt.Sprintf("%d : reader add_provider", int(time.Since(ctime).Seconds()))
+				}
+				atomic.AddUint64(&dht.metric_read_add_provider, 1)
+
+				pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
+
+				_, cid, err := cid.CidFromBytes(req.GetKey())
 				if err == nil {
-					s := fmt.Sprintf("%s,%s", peerID, pid.Pretty())
-					dht.log_get_ipns.WriteData(s)
-				}
-			}
-		case 2:
-			if LOG_SESSIONS {
-				slog <- fmt.Sprintf("%d : reader add_provider", int(time.Since(ctime).Seconds()))
-			}
-			atomic.AddUint64(&dht.metric_read_add_provider, 1)
 
-			pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
-
-			_, cid, err := cid.CidFromBytes(req.GetKey())
-			if err == nil {
-
-				// Log all providers...
-				for _, pi := range pinfos {
-					for _, a := range pi.Addrs {
-						s := fmt.Sprintf("%s,%s,%s,%s", peerID, cid, pi.ID, a)
-						dht.log_addproviders.WriteData(s)
+					// Log all providers...
+					for _, pi := range pinfos {
+						for _, a := range pi.Addrs {
+							s := fmt.Sprintf("%s,%s,%s,%s", peerID, cid, pi.ID, a)
+							dht.log_addproviders.WriteData(s)
+						}
 					}
 				}
-			}
-		case 3:
-			if LOG_SESSIONS {
-				slog <- fmt.Sprintf("%d : reader get_provider", int(time.Since(ctime).Seconds()))
-			}
-			atomic.AddUint64(&dht.metric_read_get_provider, 1)
-
-			_, cid, err := cid.CidFromBytes(req.GetKey())
-			if err == nil {
-				s := fmt.Sprintf("%s,%s", peerID, cid)
-				dht.log_getproviders.WriteData(s)
-			}
-		case 4:
-			if LOG_SESSIONS {
-				slog <- fmt.Sprintf("%d : reader find_node", int(time.Since(ctime).Seconds()))
-			}
-			atomic.AddUint64(&dht.metric_read_find_node, 1)
-		case 5:
-			if LOG_SESSIONS {
-				slog <- fmt.Sprintf("%d : reader ping", int(time.Since(ctime).Seconds()))
-			}
-			atomic.AddUint64(&dht.metric_read_ping, 1)
-			// We need to send back a PONG?
-		}
-
-		// Check out the FIND_NODE on that!
-		for _, cpeer := range req.CloserPeers {
-
-			pid, err := peer.IDFromBytes([]byte(cpeer.Id))
-			if err == nil {
-				for _, a := range cpeer.Addrs {
-					ad, err := multiaddr.NewMultiaddrBytes(a)
-					if err == nil && isConnectable(ad) {
-
-						dht.hostmu.Lock()
-						dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
-						dht.hostmu.Unlock()
-
-						// localPeerID, fromPeerID, newPeerID, addr
-						s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
-						dht.log_peerinfo.WriteData(s)
-					}
+			case 3:
+				if LOG_SESSIONS {
+					slog <- fmt.Sprintf("%d : reader get_provider", int(time.Since(ctime).Seconds()))
 				}
+				atomic.AddUint64(&dht.metric_read_get_provider, 1)
 
-				atomic.AddUint64(&dht.metric_peers_found, 1)
+				_, cid, err := cid.CidFromBytes(req.GetKey())
+				if err == nil {
+					s := fmt.Sprintf("%s,%s", peerID, cid)
+					dht.log_getproviders.WriteData(s)
+				}
+			case 4:
+				if LOG_SESSIONS {
+					slog <- fmt.Sprintf("%d : reader find_node", int(time.Since(ctime).Seconds()))
+				}
+				atomic.AddUint64(&dht.metric_read_find_node, 1)
+			case 5:
+				if LOG_SESSIONS {
+					slog <- fmt.Sprintf("%d : reader ping", int(time.Since(ctime).Seconds()))
+				}
+				atomic.AddUint64(&dht.metric_read_ping, 1)
+				// We need to send back a PONG?
+			}
 
-				// Add it to our node details
-				dht.nodedetails.Add(pid.Pretty())
+			// Check out the FIND_NODE on that!
+			for _, cpeer := range req.CloserPeers {
+
+				pid, err := peer.IDFromBytes([]byte(cpeer.Id))
+				if err == nil {
+					for _, a := range cpeer.Addrs {
+						ad, err := multiaddr.NewMultiaddrBytes(a)
+						if err == nil && isConnectable(ad) {
+
+							dht.hostmu.Lock()
+							dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
+							dht.hostmu.Unlock()
+
+							// localPeerID, fromPeerID, newPeerID, addr
+							s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
+							dht.log_peerinfo.WriteData(s)
+						}
+					}
+
+					atomic.AddUint64(&dht.metric_peers_found, 1)
+
+					// Add it to our node details
+					dht.nodedetails.Add(pid.Pretty())
+				}
 			}
 		}
 	}
@@ -855,8 +812,6 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 	pid := s.Conn().RemotePeer()
 
 	dht.WritePeerInfo(pid)
-
-	// TODO: Setup a channel for writes based on reading
 
 	sid := uuid.NewString()
 
@@ -908,11 +863,11 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 
 		}(ctx, f)
 	}
-	// Start something up to periodically FIND_NODE and PING
-	go dht.doPeriodicWrites(ctx, cancelFunc, s, sessionLog, sessionDone)
 
-	// Start something to read messages
-	go dht.doReading(ctx, cancelFunc, s, sessionLog)
+	ses := NewDHTSession(ctx, s, isIncoming)
+
+	// Start something up to periodically FIND_NODE and PING
+	go dht.handleSession(ses, ctx, cancelFunc, s, sessionLog, sessionDone)
 }
 
 // WritePeerInfo - write some data from our peerstore for pid
