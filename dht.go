@@ -46,8 +46,8 @@ const (
 
 const CONNECTION_MAX_TIME = 5 * time.Minute
 
-const MAX_SESSIONS_IN = 120
-const TARGET_SESSIONS_IN = 102
+const MAX_SESSIONS_IN = 0
+const TARGET_SESSIONS_IN = 0
 
 const MAX_SESSIONS_OUT = 1200
 const TARGET_SESSIONS_OUT = 1024
@@ -107,6 +107,8 @@ var (
 		Name: "dht_ns_total_in_dht_streams", Help: ""})
 	p_ns_total_out_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_ns_total_out_dht_streams", Help: ""})
+	p_ns_total_empty_connections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_ns_total_empty_connections", Help: ""})
 
 	p_nd_total_nodes = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_nd_total_nodes", Help: ""})
@@ -118,6 +120,9 @@ var (
 		Name: "dht_nd_total_connected", Help: ""})
 	p_nd_avg_since = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_nd_avg_since", Help: ""})
+
+	p_nd_peerstore_size = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_peerstore_size", Help: ""})
 
 	p_total_agents = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "dht_total_agents", Help: ""}, []string{"agent"})
@@ -157,12 +162,13 @@ func (dht *DHT) UpdateStats() {
 	p_active_writers.Set(float64(dht.metric_active_writers))
 	p_active_readers.Set(float64(dht.metric_active_readers))
 
-	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams := dht.CurrentStreams()
+	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
 	p_ns_total_connections.Set(float64(total_connections))
 	p_ns_total_streams.Set(float64(total_streams))
 	p_ns_total_dht_streams.Set(float64(total_dht_streams))
 	p_ns_total_in_dht_streams.Set(float64(total_in_dht_streams))
 	p_ns_total_out_dht_streams.Set(float64(total_out_dht_streams))
+	p_ns_total_empty_connections.Set(float64(total_empty_connections))
 
 	total_nodes, total_ready, total_expired, total_connected, avg_since := dht.nodedetails.GetStats()
 
@@ -171,6 +177,8 @@ func (dht *DHT) UpdateStats() {
 	p_nd_total_expired.Set(float64(total_expired))
 	p_nd_total_connected.Set(float64(total_connected))
 	p_nd_avg_since.Set(float64(avg_since))
+
+	p_nd_peerstore_size.Set(float64(dht.peerstore.Peers().Len()))
 
 	p_pending_connects.Set(float64(dht.metric_pending_connect))
 
@@ -237,7 +245,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
-		nodedetails:         *NewNodeDetails(MAX_NODE_DETAILS),
+		nodedetails:         *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
 		target_sessions_in:  TARGET_SESSIONS_IN,
 		max_sessions_in:     MAX_SESSIONS_IN,
 		target_sessions_out: TARGET_SESSIONS_OUT,
@@ -260,7 +268,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		log_stats:           NewOutputdataSimple("stats", output_file_period),
 	}
 
-	// Start something to try keep us alive...
+	// Start something to try keep us alive, and to trim empty connections
 	go func() {
 		for {
 			total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_out))
@@ -332,7 +340,7 @@ func (dht *DHT) SetHosts(peerstore peerstore.Peerstore, hosts []host.Host) {
 }
 
 // CurrentStreams - get number of current streams
-func (dht *DHT) CurrentStreams() (int, int, int, int, int) {
+func (dht *DHT) CurrentStreams() (int, int, int, int, int, int) {
 	dht.hostmu.Lock()
 	defer dht.hostmu.Unlock()
 
@@ -343,26 +351,33 @@ func (dht *DHT) CurrentStreams() (int, int, int, int, int) {
 	total_in_dht_streams := 0
 	total_out_dht_streams := 0
 
+	total_empty_connections := 0
+
 	for _, host := range dht.hosts {
 		cons := host.Network().Conns()
 
 		total_connections += len(cons)
 		for _, con := range cons {
 			total_streams += len(con.GetStreams())
-			for _, stream := range con.GetStreams() {
-				if stream.Protocol() == proto {
-					total_dht_streams++
-					stats := stream.Stat()
-					if stats.Direction == network.DirInbound {
-						total_in_dht_streams++
-					} else {
-						total_out_dht_streams++
+			if len(con.GetStreams()) == 0 {
+				con.Close()
+				total_empty_connections++
+			} else {
+				for _, stream := range con.GetStreams() {
+					if stream.Protocol() == proto {
+						total_dht_streams++
+						stats := stream.Stat()
+						if stats.Direction == network.DirInbound {
+							total_in_dht_streams++
+						} else {
+							total_out_dht_streams++
+						}
 					}
 				}
 			}
 		}
 	}
-	return total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams
+	return total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections
 }
 
 // ShowStats - print out some stats about our crawl
@@ -373,16 +388,17 @@ func (dht *DHT) ShowStats() {
 	num_hosts := len(dht.hosts)
 	dht.hostmu.Unlock()
 
-	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams := dht.CurrentStreams()
+	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
 
 	fmt.Printf("DHT uptime=%.2fs total_peers_found=%d\n", time.Since(dht.started).Seconds(), dht.metric_peers_found)
-	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d (%d in %d out) peerstore=%d\n",
+	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d (%d in %d out) empty_cons=%d peerstore=%d\n",
 		num_hosts,
 		total_connections,
 		total_streams,
 		total_dht_streams,
 		total_in_dht_streams,
 		total_out_dht_streams,
+		total_empty_connections,
 		total_peerstore)
 	fmt.Printf("Total Connections out=%d (%d fails) (%d rejected) in=%d (%d rejected)\n",
 		dht.metric_con_outgoing_success,
@@ -539,7 +555,6 @@ func (dht *DHT) doPeriodicWrites(ctx context.Context, cancelFunc context.CancelF
 
 		dht.log_sessions_w.WriteData(s)
 		if LOG_SESSIONS {
-
 			slog <- fmt.Sprintf("%d : writer done", int(time.Since(ctime).Seconds()))
 		}
 	}()

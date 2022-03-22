@@ -5,6 +5,9 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/libp2p/go-libp2p-core/peerstore"
 )
 
 const (
@@ -25,17 +28,19 @@ type NodeInfo struct {
 
 // NodeDetails contains info about lots of nodes
 type NodeDetails struct {
-	maxSize int
-	allIDs  []string
-	nodes   map[string]*NodeInfo
-	mutex   sync.Mutex
+	maxSize   int
+	allIDs    []string
+	nodes     map[string]*NodeInfo
+	mutex     sync.Mutex
+	peerstore peerstore.Peerstore
 }
 
 // NewNodeDetails makes a new NodeDetails
-func NewNodeDetails(maxSize int) *NodeDetails {
+func NewNodeDetails(maxSize int, peerstore peerstore.Peerstore) *NodeDetails {
 	nd := &NodeDetails{}
 	nd.nodes = make(map[string]*NodeInfo)
 	nd.maxSize = maxSize
+	nd.peerstore = peerstore
 	return nd
 }
 
@@ -91,18 +96,9 @@ func (nd *NodeDetails) Add(id string) {
 		// Do we need to find one to remove?
 		if len(nd.allIDs) == nd.maxSize {
 			// TODO: Find a good candidate to remove
-
-			// For now, make it random...
 			i := rand.Intn(len(nd.allIDs))
 			id := nd.allIDs[i]
-			delete(nd.nodes, id)
-			for i, val := range nd.allIDs {
-				if val == id {
-					nd.allIDs[i] = nd.allIDs[len(nd.allIDs)-1]
-					nd.allIDs = nd.allIDs[:len(nd.allIDs)-1]
-					break
-				}
-			}
+			nd.remove(id)
 		}
 
 		now := time.Now()
@@ -138,6 +134,15 @@ func (nd *NodeDetails) remove(id string) {
 				break
 			}
 		}
+	}
+
+	// Remove it from the peerstore as well
+	peerid, err := peer.Decode(id)
+	if err == nil {
+		nd.peerstore.ClearAddrs(peerid)
+		nd.peerstore.RemovePeer(peerid)
+	} else {
+		fmt.Printf("Error with id %s\n", id)
 	}
 }
 
