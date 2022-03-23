@@ -42,18 +42,16 @@ const (
 
 const CONNECTION_MAX_TIME = 5 * time.Minute
 
-const MAX_SESSIONS_IN = 100
-const TARGET_SESSIONS_IN = 100
+const MAX_SESSIONS_IN = 0
+const TARGET_SESSIONS_IN = 0
 
-const MAX_SESSIONS_OUT = 100
-const TARGET_SESSIONS_OUT = 100
+const MAX_SESSIONS_OUT = 1200
+const TARGET_SESSIONS_OUT = 1024
 
 const MAX_NODE_DETAILS = 10000
 
 const PERIOD_SEND_FIND_NODE = 10 * time.Second
 const PERIOD_SEND_PING = 30 * time.Second
-
-const LOG_SESSIONS = false
 
 var (
 	p_pending_connects = promauto.NewGauge(prometheus.GaugeOpts{
@@ -229,8 +227,6 @@ type DHT struct {
 	log_peer_protocols Outputdata
 	log_peer_agents    Outputdata
 	log_peer_ids       Outputdata
-	log_sessions_r     Outputdata
-	log_sessions_w     Outputdata
 	log_stats          Outputdata
 }
 
@@ -257,8 +253,6 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		log_put_ipns:        NewOutputdata("put_ipns", output_file_period),
 		log_get_ipns:        NewOutputdata("get_ipns", output_file_period),
 		log_put_pk:          NewOutputdata("put_pk", output_file_period),
-		log_sessions_r:      NewOutputdata("sessions_r", output_file_period),
-		log_sessions_w:      NewOutputdata("sessions_w", output_file_period),
 		log_stats:           NewOutputdataSimple("stats", output_file_period),
 	}
 
@@ -522,6 +516,9 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 
 	ticker_ping := time.NewTicker(PERIOD_SEND_PING)
 	ticker_find_node := time.NewTicker(PERIOD_SEND_FIND_NODE)
+
+	defer ticker_ping.Stop()
+	defer ticker_find_node.Stop()
 
 	// Are we waiting for a PING reply?
 	PENDING_PING_RESPONSE := false

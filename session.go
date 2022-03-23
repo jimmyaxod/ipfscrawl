@@ -39,9 +39,9 @@ func NewDHTSession(ctx context.Context, s network.Stream, isIncoming bool) DHTSe
 		context:           ctx,
 		sid:               uuid.NewString(),
 		total_messages_in: 0,
-		SAVE_SESSION_LOGS: true,
-		LOG_DATA_IN:       true,
-		LOG_DATA_OUT:      true,
+		SAVE_SESSION_LOGS: false,
+		LOG_DATA_IN:       false,
+		LOG_DATA_OUT:      false,
 	}
 
 	if session.SAVE_SESSION_LOGS {
