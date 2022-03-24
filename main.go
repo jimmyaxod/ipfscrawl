@@ -20,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
+	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
 	"github.com/libp2p/go-tcp-transport"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -151,6 +152,10 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 			libp2p.UserAgent("ipfscrawl"),
 			//			libp2p.ConnectionManager(connman),
 		)
+
+		ping.NewPingService(myhost)
+		// ps is a ping service
+
 		if err == nil {
 			return myhost
 		}

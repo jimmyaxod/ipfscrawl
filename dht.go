@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/ipfs/go-cid"
+
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
+
 	"github.com/multiformats/go-multiaddr"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,16 +44,13 @@ const (
 
 const CONNECTION_MAX_TIME = 5 * time.Minute
 
-const MAX_SESSIONS_IN = 0
-const TARGET_SESSIONS_IN = 0
+const MAX_SESSIONS_IN = 1200
+const TARGET_SESSIONS_IN = 1024
 
 const MAX_SESSIONS_OUT = 1200
 const TARGET_SESSIONS_OUT = 1024
 
 const MAX_NODE_DETAILS = 10000
-
-const PERIOD_SEND_FIND_NODE = 10 * time.Second
-const PERIOD_SEND_PING = 30 * time.Second
 
 var (
 	p_pending_connects = promauto.NewGauge(prometheus.GaugeOpts{
@@ -496,75 +495,97 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	dht.ProcessPeerStream(ctx, cancelFunc, s, true)
 }
 
-// doReading reads msgs from stream and processes...
-func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, sessionDone func()) {
+// handleSession handles a new RPC...
+func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, isIncoming bool, sessionDone func()) {
 	defer sessionDone()
 
 	peerID := s.Conn().RemotePeer().Pretty()
 	localPeerID := s.Conn().LocalPeer().Pretty()
 	ses.Log(fmt.Sprintf("Start %s -> %s", localPeerID, peerID))
 
-	defer cancelFunc()
-
-	// Close the stream in the writer only...
+	// cancel context, and drain the read channel so it's not blocked and can exit thread etc
 	defer func() {
 		s.Close()
 		s.Conn().Close()
+
+		cancelFunc()
+
+		for {
+			_, ok := <-ses.ReadChannel
+			if !ok {
+				break
+			}
+		}
 	}()
 
 	defer dht.nodedetails.Disconnected(peerID)
 
-	ticker_ping := time.NewTicker(PERIOD_SEND_PING)
-	ticker_find_node := time.NewTicker(PERIOD_SEND_FIND_NODE)
+	if !isIncoming {
+		// Do a FIND_NODE
+		key := make([]byte, 16)
+		rand.Read(key)
 
-	defer ticker_ping.Stop()
-	defer ticker_find_node.Stop()
+		msg := pb.Message{
+			Type: pb.Message_FIND_NODE,
+			Key:  key,
+		}
+		err := ses.Write(msg)
+		if err != nil {
+			return
+		}
 
-	// Are we waiting for a PING reply?
-	PENDING_PING_RESPONSE := false
-	// Are we waiting for a FIND_NODE reply?
-	PENDING_FIND_NODE_RESPONSE := false
+		atomic.AddUint64(&dht.metric_written_find_node, 1)
+		ses.Log(fmt.Sprintf("writer sent find_node"))
 
-	for {
-		// Check if the context is done...
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker_ping.C:
-			if !PENDING_PING_RESPONSE {
-				// Send out a ping
-				msg_ping := pb.Message{
-					Type: pb.Message_PING,
-				}
-
-				err := ses.Write(msg_ping)
-				if err != nil {
-					return
-				}
-				atomic.AddUint64(&dht.metric_written_ping, 1)
-				ses.Log(fmt.Sprintf("writer sent ping"))
-				PENDING_PING_RESPONSE = true
+		case req, ok := <-ses.ReadChannel:
+			if !ok {
+				// Error on read, let's close things up...
+				return
 			}
-		case <-ticker_find_node.C:
-			if !PENDING_FIND_NODE_RESPONSE {
-				// Send out a find_node for a random key
 
-				key := make([]byte, 16)
-				rand.Read(key)
+			if req.GetType() == pb.Message_FIND_NODE {
+				if len(req.CloserPeers) > 0 {
+					ses.Log(fmt.Sprintf("reader CloserPeers %d", len(req.CloserPeers)))
+					// Check out the FIND_NODE on that!
+					for _, cpeer := range req.CloserPeers {
 
-				msg := pb.Message{
-					Type: pb.Message_FIND_NODE,
-					Key:  key,
+						pid, err := peer.IDFromBytes([]byte(cpeer.Id))
+						if err == nil {
+							for _, a := range cpeer.Addrs {
+								ad, err := multiaddr.NewMultiaddrBytes(a)
+								if err == nil && isConnectable(ad) {
+
+									dht.hostmu.Lock()
+									dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
+									dht.hostmu.Unlock()
+
+									// localPeerID, fromPeerID, newPeerID, addr
+									s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
+									dht.log_peerinfo.WriteData(s)
+								}
+							}
+
+							atomic.AddUint64(&dht.metric_peers_found, 1)
+
+							// Add it to our node details
+							dht.nodedetails.Add(pid.Pretty())
+						}
+					}
 				}
-				err := ses.Write(msg)
-				if err != nil {
-					return
-				}
 
-				atomic.AddUint64(&dht.metric_written_find_node, 1)
-				ses.Log(fmt.Sprintf("writer sent find_node"))
-				PENDING_FIND_NODE_RESPONSE = true
+			} else {
+				ses.Log(fmt.Sprintf("Unexpected message"))
 			}
+		}
+
+	} else {
+		// Incoming request
+		select {
+		case <-ctx.Done():
+			return
 		case req, ok := <-ses.ReadChannel:
 			if !ok {
 				// Error on read, let's close things up...
@@ -666,75 +687,35 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 			case pb.Message_FIND_NODE:
 				ses.Log(fmt.Sprintf("reader find_node"))
 				atomic.AddUint64(&dht.metric_read_find_node, 1)
-				if PENDING_FIND_NODE_RESPONSE {
-					PENDING_FIND_NODE_RESPONSE = false
-
-					if len(req.CloserPeers) > 0 {
-						ses.Log(fmt.Sprintf("reader CloserPeers %d", len(req.CloserPeers)))
-						// Check out the FIND_NODE on that!
-						for _, cpeer := range req.CloserPeers {
-
-							pid, err := peer.IDFromBytes([]byte(cpeer.Id))
-							if err == nil {
-								for _, a := range cpeer.Addrs {
-									ad, err := multiaddr.NewMultiaddrBytes(a)
-									if err == nil && isConnectable(ad) {
-
-										dht.hostmu.Lock()
-										dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
-										dht.hostmu.Unlock()
-
-										// localPeerID, fromPeerID, newPeerID, addr
-										s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
-										dht.log_peerinfo.WriteData(s)
-									}
-								}
-
-								atomic.AddUint64(&dht.metric_peers_found, 1)
-
-								// Add it to our node details
-								dht.nodedetails.Add(pid.Pretty())
-							}
-						}
-					}
-
-				} else {
-					// Make a reply and send it...
-					msg := pb.Message{
-						Type:            pb.Message_FIND_NODE,
-						Key:             req.Key,
-						CloserPeers:     make([]pb.Message_Peer, 0),
-						ClusterLevelRaw: req.ClusterLevelRaw,
-					}
-					err := ses.Write(msg)
-					if err != nil {
-						return
-					}
-
-					atomic.AddUint64(&dht.metric_written_find_node_reply, 1)
-					ses.Log(fmt.Sprintf("writer sent find_node_reply"))
+				// Make a reply and send it...
+				msg := pb.Message{
+					Type:            pb.Message_FIND_NODE,
+					Key:             req.Key,
+					CloserPeers:     make([]pb.Message_Peer, 0),
+					ClusterLevelRaw: req.ClusterLevelRaw,
 				}
+				err := ses.Write(msg)
+				if err != nil {
+					return
+				}
+
+				atomic.AddUint64(&dht.metric_written_find_node_reply, 1)
+				ses.Log(fmt.Sprintf("writer sent find_node_reply"))
 			case pb.Message_PING:
 				ses.Log(fmt.Sprintf("reader ping"))
 				atomic.AddUint64(&dht.metric_read_ping, 1)
-				// We need to send back a PONG?
-				if PENDING_PING_RESPONSE {
-					// We got a response. All is well with the world.
-					PENDING_PING_RESPONSE = false
-				} else {
-					// We need to reply to them with a ping then...
-					msg_ping := pb.Message{
-						Type:            pb.Message_PING,
-						ClusterLevelRaw: req.ClusterLevelRaw,
-					}
-
-					err := ses.Write(msg_ping)
-					if err != nil {
-						return
-					}
-					atomic.AddUint64(&dht.metric_written_ping_reply, 1)
-					ses.Log(fmt.Sprintf("writer sent ping reply"))
+				// We need to reply to them with a ping then...
+				msg_ping := pb.Message{
+					Type:            pb.Message_PING,
+					ClusterLevelRaw: req.ClusterLevelRaw,
 				}
+
+				err := ses.Write(msg_ping)
+				if err != nil {
+					return
+				}
+				atomic.AddUint64(&dht.metric_written_ping_reply, 1)
+				ses.Log(fmt.Sprintf("writer sent ping reply"))
 			}
 		}
 	}
@@ -797,8 +778,7 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 
 	ses := NewDHTSession(ctx, s, isIncoming)
 
-	// Start something up to periodically FIND_NODE and PING
-	go dht.handleSession(ses, ctx, cancelFunc, s, sessionDone)
+	go dht.handleSession(ses, ctx, cancelFunc, s, isIncoming, sessionDone)
 }
 
 // WritePeerInfo - write some data from our peerstore for pid
