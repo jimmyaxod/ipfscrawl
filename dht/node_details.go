@@ -255,5 +255,8 @@ func (nd *NodeDetails) Get() peer.ID {
 				nd.remove(id)
 			}
 		}
+		nd.mutex.Unlock()
+		// Let something else have a turn...
+		nd.mutex.Lock()
 	}
 }

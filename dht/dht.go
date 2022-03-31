@@ -263,7 +263,7 @@ func (dht *DHT) ShowStats() {
 // Connect connects to a new peer, and starts an eventloop for it
 // Assumes that tryConnectTo has already been called...
 func (dht *DHT) Connect(id peer.ID) error {
-	//	fmt.Printf("Outgoing [%s]\n", id.Pretty())
+	fmt.Printf("Outgoing [%s]\n", id.Pretty())
 
 	atomic.AddInt64(&dht.metric_pending_connect, 1)
 	defer func() {
@@ -278,10 +278,13 @@ func (dht *DHT) Connect(id peer.ID) error {
 		atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
 		return errors.New("No capacity")
 	}
-	if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
-		atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
-		return errors.New("Dupe")
-	}
+	// NB It's assumed it came from a Get() so this isn't required.
+	/*
+		if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
+			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
+			return errors.New("Dupe")
+		}
+	*/
 
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
@@ -295,6 +298,7 @@ func (dht *DHT) Connect(id peer.ID) error {
 		cancelFunc()
 		return err
 	}
+
 	dht.nodedetails.Connected(id.Pretty())
 	dht.nodedetails.ConnectSuccess(id.Pretty())
 	atomic.AddUint64(&dht.metric_con_outgoing_success, 1)
@@ -382,18 +386,14 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 
 	ses := NewDHTSession(ctx, dht.sessionMgr, s, isIncoming)
 
-	go func(d *DHT, isIn bool) func() {
-		return func() {
-			ses.Handle()
-
-			if isIn {
-				atomic.AddInt64(&d.metric_active_sessions_in, -1)
-			} else {
-				atomic.AddInt64(&d.metric_active_sessions_out, -1)
-			}
+	go func() {
+		ses.Handle()
+		if isIncoming {
+			atomic.AddInt64(&dht.metric_active_sessions_in, -1)
+		} else {
+			atomic.AddInt64(&dht.metric_active_sessions_out, -1)
 		}
-
-	}(dht, isIncoming)
+	}()
 }
 
 // WritePeerInfo - write some data from our peerstore for pid

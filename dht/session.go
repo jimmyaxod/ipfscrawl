@@ -42,7 +42,7 @@ type DHTSession struct {
 }
 
 // Create a new DHTSession
-func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream, isIncoming bool) DHTSession {
+func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream, isIncoming bool) *DHTSession {
 	session := DHTSession{
 		mgr:               mgr,
 		ctime:             time.Now(),
@@ -52,9 +52,9 @@ func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream, is
 		context:           ctx,
 		sid:               uuid.NewString(),
 		total_messages_in: 0,
-		SAVE_SESSION_LOGS: false,
-		LOG_DATA_IN:       false,
-		LOG_DATA_OUT:      false,
+		SAVE_SESSION_LOGS: true,
+		LOG_DATA_IN:       true,
+		LOG_DATA_OUT:      true,
 	}
 
 	if session.SAVE_SESSION_LOGS {
@@ -78,7 +78,7 @@ func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream, is
 
 	// Read messages and put them on the ReadChannel
 	go session.readMessages()
-	return session
+	return &session
 }
 
 // Close this session do any tidying up etc
