@@ -2,7 +2,6 @@ package dht
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -88,11 +87,6 @@ var (
 
 	p_session_total_time = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_session_total_time", Help: ""})
-
-	p_active_sessions_in = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_active_sessions_in", Help: ""})
-	p_active_sessions_out = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_active_sessions_out", Help: ""})
 )
 
 // Update prometheus stats
@@ -125,9 +119,6 @@ func (dht *DHT) UpdateStats() {
 	p_nd_peerstore_size.Set(float64(dht.Peerstore.Peers().Len()))
 
 	p_pending_connects.Set(float64(dht.metric_pending_connect))
-
-	p_active_sessions_in.Set(float64(dht.metric_active_sessions_in))
-	p_active_sessions_out.Set(float64(dht.metric_active_sessions_out))
 }
 
 type DHT struct {
@@ -151,9 +142,6 @@ type DHT struct {
 	metric_con_incoming          uint64
 	metric_con_incoming_rejected uint64
 	metric_peers_found           uint64
-
-	metric_active_sessions_in  int64
-	metric_active_sessions_out int64
 }
 
 // NewDHT creates a new DHT on top of the given hosts
@@ -272,20 +260,6 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 	dht.nodedetails.Add(id.Pretty())
 
-	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_out))
-
-	if total_dht_streams >= dht.max_sessions_out {
-		atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
-		return errors.New("No capacity")
-	}
-	// NB It's assumed it came from a Get() so this isn't required.
-	/*
-		if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
-			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
-			return errors.New("Dupe")
-		}
-	*/
-
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
 
@@ -302,7 +276,7 @@ func (dht *DHT) Connect(id peer.ID) error {
 	dht.nodedetails.Connected(id.Pretty())
 	dht.nodedetails.ConnectSuccess(id.Pretty())
 	atomic.AddUint64(&dht.metric_con_outgoing_success, 1)
-	dht.ProcessPeerStream(ctx, cancelFunc, s, false)
+	dht.ProcessPeerStream(ctx, cancelFunc, s)
 	return nil
 }
 
@@ -312,31 +286,12 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 
 	//	fmt.Printf("Incoming [%s]\n", pid.Pretty())
 	dht.nodedetails.Add(pid.Pretty())
-
-	// If we have enough connections, check if we should reject it
-	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_in))
-
-	if total_dht_streams >= dht.max_sessions_in {
-		atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
-		s.Close()
-		s.Conn().Close()
-		return
-	}
-
-	if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
-		atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
-		s.Close()
-		s.Conn().Close()
-		return
-	}
-
-	// Handle it...
 	dht.nodedetails.ConnectSuccess(pid.Pretty())
 	dht.nodedetails.Connected(pid.Pretty())
 
 	atomic.AddUint64(&dht.metric_con_incoming, 1)
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
-	dht.ProcessPeerStream(ctx, cancelFunc, s, true)
+	dht.ProcessPeerStream(ctx, cancelFunc, s)
 }
 
 // Filter out some common unconnectable addresses...
@@ -373,26 +328,15 @@ func isConnectable(a multiaddr.Multiaddr) bool {
 }
 
 // Process a peer stream
-func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, isIncoming bool) {
+func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream) {
 	pid := s.Conn().RemotePeer()
 
 	dht.WritePeerInfo(pid)
 
-	if isIncoming {
-		atomic.AddInt64(&dht.metric_active_sessions_in, 1)
-	} else {
-		atomic.AddInt64(&dht.metric_active_sessions_out, 1)
-	}
-
-	ses := NewDHTSession(ctx, dht.sessionMgr, s, isIncoming)
-
+	ses := NewDHTSession(ctx, dht.sessionMgr, s)
 	go func() {
 		ses.Handle()
-		if isIncoming {
-			atomic.AddInt64(&dht.metric_active_sessions_in, -1)
-		} else {
-			atomic.AddInt64(&dht.metric_active_sessions_out, -1)
-		}
+		dht.nodedetails.Disconnected(pid.Pretty())
 	}()
 }
 

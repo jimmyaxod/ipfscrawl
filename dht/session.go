@@ -42,12 +42,12 @@ type DHTSession struct {
 }
 
 // Create a new DHTSession
-func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream, isIncoming bool) *DHTSession {
+func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream) *DHTSession {
 	session := DHTSession{
 		mgr:               mgr,
 		ctime:             time.Now(),
 		stream:            s,
-		isIncoming:        isIncoming,
+		isIncoming:        s.Stat().Direction == network.DirInbound,
 		readChannel:       make(chan pb.Message, 1),
 		context:           ctx,
 		sid:               uuid.NewString(),
@@ -59,12 +59,7 @@ func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream, is
 
 	if session.SAVE_SESSION_LOGS {
 		pid := s.Conn().RemotePeer()
-
-		// Create a session log
-		direction := "out"
-		if isIncoming {
-			direction = "in"
-		}
+		direction := s.Stat().Direction.String()
 
 		f, err := os.Create(fmt.Sprintf("sessions/%s_%s_%s", direction, pid, session.sid))
 		if err != nil {
