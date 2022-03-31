@@ -1,4 +1,4 @@
-package main
+package dht
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	outputdata "github.com/jimmyaxod/ipfscrawl/data"
 
 	"github.com/ipfs/go-cid"
 
@@ -166,7 +168,7 @@ func (dht *DHT) UpdateStats() {
 	p_nd_total_connected.Set(float64(total_connected))
 	p_nd_avg_since.Set(float64(avg_since))
 
-	p_nd_peerstore_size.Set(float64(dht.peerstore.Peers().Len()))
+	p_nd_peerstore_size.Set(float64(dht.Peerstore.Peers().Len()))
 
 	p_pending_connects.Set(float64(dht.metric_pending_connect))
 
@@ -182,7 +184,7 @@ type DHT struct {
 
 	target_peerstore int
 
-	peerstore peerstore.Peerstore
+	Peerstore peerstore.Peerstore
 	hosts     []host.Host
 
 	started time.Time
@@ -208,18 +210,18 @@ type DHT struct {
 	metric_active_sessions_in  int64
 	metric_active_sessions_out int64
 
-	log_peerinfo       Outputdata
-	log_addproviders   Outputdata
-	log_getproviders   Outputdata
-	log_put            Outputdata
-	log_get            Outputdata
-	log_put_ipns       Outputdata
-	log_get_ipns       Outputdata
-	log_put_pk         Outputdata
-	log_peer_protocols Outputdata
-	log_peer_agents    Outputdata
-	log_peer_ids       Outputdata
-	log_stats          Outputdata
+	log_peerinfo       outputdata.Outputdata
+	log_addproviders   outputdata.Outputdata
+	log_getproviders   outputdata.Outputdata
+	log_put            outputdata.Outputdata
+	log_get            outputdata.Outputdata
+	log_put_ipns       outputdata.Outputdata
+	log_get_ipns       outputdata.Outputdata
+	log_put_pk         outputdata.Outputdata
+	log_peer_protocols outputdata.Outputdata
+	log_peer_agents    outputdata.Outputdata
+	log_peer_ids       outputdata.Outputdata
+	log_stats          outputdata.Outputdata
 }
 
 // NewDHT creates a new DHT on top of the given hosts
@@ -231,20 +233,20 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		max_sessions_in:    MAX_SESSIONS_IN,
 		max_sessions_out:   MAX_SESSIONS_OUT,
 		hosts:              hosts,
-		peerstore:          peerstore,
+		Peerstore:          peerstore,
 		started:            time.Now(),
-		log_peerinfo:       NewOutputdata("peerinfo", output_file_period),
-		log_peer_protocols: NewOutputdata("peerprotocols", output_file_period),
-		log_peer_agents:    NewOutputdata("peeragents", output_file_period),
-		log_peer_ids:       NewOutputdata("peerids", output_file_period),
-		log_addproviders:   NewOutputdata("addproviders", output_file_period),
-		log_getproviders:   NewOutputdata("getproviders", output_file_period),
-		log_put:            NewOutputdata("put", output_file_period),
-		log_get:            NewOutputdata("get", output_file_period),
-		log_put_ipns:       NewOutputdata("put_ipns", output_file_period),
-		log_get_ipns:       NewOutputdata("get_ipns", output_file_period),
-		log_put_pk:         NewOutputdata("put_pk", output_file_period),
-		log_stats:          NewOutputdataSimple("stats", output_file_period),
+		log_peerinfo:       outputdata.NewOutputdata("peerinfo", output_file_period),
+		log_peer_protocols: outputdata.NewOutputdata("peerprotocols", output_file_period),
+		log_peer_agents:    outputdata.NewOutputdata("peeragents", output_file_period),
+		log_peer_ids:       outputdata.NewOutputdata("peerids", output_file_period),
+		log_addproviders:   outputdata.NewOutputdata("addproviders", output_file_period),
+		log_getproviders:   outputdata.NewOutputdata("getproviders", output_file_period),
+		log_put:            outputdata.NewOutputdata("put", output_file_period),
+		log_get:            outputdata.NewOutputdata("get", output_file_period),
+		log_put_ipns:       outputdata.NewOutputdata("put_ipns", output_file_period),
+		log_get_ipns:       outputdata.NewOutputdata("get_ipns", output_file_period),
+		log_put_pk:         outputdata.NewOutputdata("put_pk", output_file_period),
+		log_stats:          outputdata.NewOutputdataSimple("stats", output_file_period),
 	}
 
 	// Set it up to handle incoming streams of the correct protocol
@@ -321,7 +323,7 @@ func (dht *DHT) CurrentStreams() (int, int, int, int, int, int) {
 // ShowStats - print out some stats about our crawl
 func (dht *DHT) ShowStats() {
 	// How many connections do we have?, how many streams?
-	total_peerstore := dht.peerstore.Peers().Len()
+	total_peerstore := dht.Peerstore.Peers().Len()
 	num_hosts := len(dht.hosts)
 
 	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
@@ -515,7 +517,7 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 								ad, err := multiaddr.NewMultiaddrBytes(a)
 								if err == nil && isConnectable(ad) {
 
-									dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
+									dht.Peerstore.AddAddr(pid, ad, 1*time.Hour)
 
 									// localPeerID, fromPeerID, newPeerID, addr
 									s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
@@ -739,8 +741,8 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 // WritePeerInfo - write some data from our peerstore for pid
 func (dht *DHT) WritePeerInfo(pid peer.ID) {
 	// Find out some info about the peer...
-	protocols, protoerr := dht.peerstore.GetProtocols(pid)
-	agent, agenterr := dht.peerstore.Get(pid, "AgentVersion")
+	protocols, protoerr := dht.Peerstore.GetProtocols(pid)
+	agent, agenterr := dht.Peerstore.Get(pid, "AgentVersion")
 
 	if protoerr == nil {
 		for _, proto := range protocols {

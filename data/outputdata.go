@@ -1,4 +1,4 @@
-package main
+package data
 
 /**
  * outputdata is a very simple logfile outputter to keep the crawler fast.

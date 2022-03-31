@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	crawldht "github.com/jimmyaxod/ipfscrawl/dht"
+
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
@@ -60,7 +62,7 @@ func main() {
 	}
 
 	// Create a dht crawler using the above hosts
-	dhtc := NewDHT(peerstore, hosts)
+	dhtc := crawldht.NewDHT(peerstore, hosts)
 
 	if *bootstrap != "" {
 		bits := strings.Split(*bootstrap, "@")
@@ -96,14 +98,14 @@ func main() {
 }
 
 // connect to something
-func connect(dhtc *DHT, id string, addr string) {
+func connect(dhtc *crawldht.DHT, id string, addr string) {
 	fmt.Printf("Connecting to %s %s...\n", id, addr)
 	targetID, err := peer.Decode(id)
 	if err != nil {
 		fmt.Printf("error %v\n", err)
 	}
 	targetA, err := multiaddr.NewMultiaddr(addr)
-	dhtc.peerstore.AddAddr(targetID, targetA, time.Hour)
+	dhtc.Peerstore.AddAddr(targetID, targetA, time.Hour)
 	dhtc.Connect(targetID)
 }
 
