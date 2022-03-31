@@ -86,11 +86,6 @@ var (
 	p_nd_peerstore_size = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_nd_peerstore_size", Help: ""})
 
-	p_total_agents = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "dht_total_agents", Help: ""}, []string{"agent"})
-	p_total_agents_full = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "dht_total_agents_full", Help: ""}, []string{"agent"})
-
 	p_session_total_time = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_session_total_time", Help: ""})
 
@@ -179,27 +174,16 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		host.SetStreamHandler(proto, dht.handleNewStream)
 	}
 
-	// Start something to try keep us alive, and to trim empty connections
+	// Start something to keep us alive with outgoing find_node calls
 	go func() {
+		find_node_ticker := time.NewTicker(1 * time.Second)
+
 		for {
-			total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_out))
-
-			total_dht_streams += int(atomic.LoadInt64(&dht.metric_pending_connect))
-
-			if total_dht_streams < dht.max_sessions_out {
+			select {
+			case <-find_node_ticker.C:
 				// Find something to connect to
-				p := dht.nodedetails.Get()
-				if p != "" {
-					targetID, err := peer.Decode(p)
-					if err == nil {
-						go dht.Connect(targetID)
-					}
-				} else {
-					// Sleep a bit and retry (NOT GOOD)
-					time.Sleep(50 * time.Millisecond)
-				}
-			} else {
-				time.Sleep(50 * time.Millisecond)
+				targetID := dht.nodedetails.Get()
+				go dht.Connect(targetID)
 			}
 		}
 	}()
@@ -428,12 +412,6 @@ func (dht *DHT) WritePeerInfo(pid peer.ID) {
 	if agenterr == nil {
 		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
 		dht.sessionMgr.log_peer_agents.WriteData(s)
-
-		ag := fmt.Sprintf("%s", agent)
-		ag_top := strings.Split(ag, "/")[0]
-
-		p_total_agents.With(prometheus.Labels{"agent": ag_top}).Inc()
-		p_total_agents_full.With(prometheus.Labels{"agent": ag}).Inc()
 	}
 
 	decoded, err := mh.Decode([]byte(pid))

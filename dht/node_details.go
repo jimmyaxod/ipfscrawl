@@ -236,30 +236,24 @@ func shouldExpire(ni *NodeInfo) bool {
 	return false
 }
 
-// Get gets a node to attempt to connect to, or "" if it can't atm
-func (nd *NodeDetails) Get() string {
+// Get gets a node to attempt to connect to. Blocks.
+func (nd *NodeDetails) Get() peer.ID {
 	nd.mutex.Lock()
 	defer nd.mutex.Unlock()
 
-	// TODO: Could optimize this better...
-	toExpire := make([]string, 0)
-
-	// Expire some...
-	defer func() {
-		for _, id := range toExpire {
-			nd.remove(id)
-		}
-	}()
-
-	for _, id := range nd.allIDs {
-		if readyForConnect(nd.nodes[id]) {
-			nd.nodes[id].lastConnectionAttemptTime = time.Now()
-			return id
-		}
+	for {
+		i := rand.Intn(len(nd.allIDs))
+		id := nd.allIDs[i]
 		if shouldExpire(nd.nodes[id]) {
-			toExpire = append(toExpire, id)
+			nd.remove(id)
+		} else if readyForConnect(nd.nodes[id]) {
+			nd.nodes[id].lastConnectionAttemptTime = time.Now()
+			targetID, err := peer.Decode(id)
+			if err == nil {
+				return targetID
+			} else {
+				nd.remove(id)
+			}
 		}
 	}
-
-	return ""
 }
