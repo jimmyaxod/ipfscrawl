@@ -34,7 +34,7 @@ const (
 	proto = "/ipfs/kad/1.0.0"
 )
 
-const CONNECTION_MAX_TIME = 5 * time.Minute
+const CONNECTION_MAX_TIME = 10 * time.Second
 
 const MAX_SESSIONS_IN = 1200
 const MAX_SESSIONS_OUT = 1200
@@ -45,18 +45,15 @@ var (
 	p_pending_connects = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_pending_connects", Help: ""})
 
-	p_con_outgoing_fail = promauto.NewGauge(prometheus.GaugeOpts{
+	p_con_outgoing_fail = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_con_outgoing_fail", Help: ""})
-	p_con_outgoing_success = promauto.NewGauge(prometheus.GaugeOpts{
+	p_con_outgoing_success = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_con_outgoing_success", Help: ""})
-	p_con_outgoing_rejected = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_con_outgoing_rejected", Help: ""})
-	p_con_incoming = promauto.NewGauge(prometheus.GaugeOpts{
+
+	p_con_incoming = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_con_incoming", Help: ""})
-	p_con_incoming_rejected = promauto.NewGauge(prometheus.GaugeOpts{
+	p_con_incoming_rejected = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_con_incoming_rejected", Help: ""})
-	p_peers_found = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_peers_found", Help: ""})
 
 	p_ns_total_connections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_ns_total_connections", Help: ""})
@@ -92,13 +89,6 @@ var (
 // Update prometheus stats
 func (dht *DHT) UpdateStats() {
 	fmt.Printf("Updating prom stats...\n")
-	p_con_outgoing_fail.Set(float64(dht.metric_con_outgoing_fail))
-	p_con_outgoing_success.Set(float64(dht.metric_con_outgoing_success))
-	p_con_outgoing_rejected.Set(float64(dht.metric_con_outgoing_rejected))
-	p_con_incoming.Set(float64(dht.metric_con_incoming))
-	p_con_incoming_rejected.Set(float64(dht.metric_con_incoming_rejected))
-
-	p_peers_found.Set(float64(dht.metric_peers_found))
 
 	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
 	p_ns_total_connections.Set(float64(total_connections))
@@ -135,13 +125,7 @@ type DHT struct {
 
 	started time.Time
 
-	metric_pending_connect       int64
-	metric_con_outgoing_fail     uint64
-	metric_con_outgoing_success  uint64
-	metric_con_outgoing_rejected uint64
-	metric_con_incoming          uint64
-	metric_con_incoming_rejected uint64
-	metric_peers_found           uint64
+	metric_pending_connect int64
 }
 
 // NewDHT creates a new DHT on top of the given hosts
@@ -225,7 +209,7 @@ func (dht *DHT) ShowStats() {
 
 	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
 
-	fmt.Printf("DHT uptime=%.2fs total_peers_found=%d\n", time.Since(dht.started).Seconds(), dht.metric_peers_found)
+	fmt.Printf("DHT uptime=%.2fs\n", time.Since(dht.started).Seconds())
 	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d (%d in %d out) empty_cons=%d peerstore=%d\n",
 		num_hosts,
 		total_connections,
@@ -235,12 +219,6 @@ func (dht *DHT) ShowStats() {
 		total_out_dht_streams,
 		total_empty_connections,
 		total_peerstore)
-	fmt.Printf("Total Connections out=%d (%d fails) (%d rejected) in=%d (%d rejected)\n",
-		dht.metric_con_outgoing_success,
-		dht.metric_con_outgoing_fail,
-		dht.metric_con_outgoing_rejected,
-		dht.metric_con_incoming,
-		dht.metric_con_incoming_rejected)
 
 	fmt.Printf(dht.nodedetails.Stats())
 
@@ -267,15 +245,15 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 	s, err := host.NewStream(ctx, id, proto)
 	if err != nil {
+		p_con_outgoing_fail.Inc()
 		dht.nodedetails.ConnectFailure(id.Pretty())
-		atomic.AddUint64(&dht.metric_con_outgoing_fail, 1)
 		cancelFunc()
 		return err
 	}
 
+	p_con_outgoing_success.Inc()
 	dht.nodedetails.Connected(id.Pretty())
 	dht.nodedetails.ConnectSuccess(id.Pretty())
-	atomic.AddUint64(&dht.metric_con_outgoing_success, 1)
 	dht.ProcessPeerStream(ctx, cancelFunc, s)
 	return nil
 }
@@ -289,7 +267,11 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	dht.nodedetails.ConnectSuccess(pid.Pretty())
 	dht.nodedetails.Connected(pid.Pretty())
 
-	atomic.AddUint64(&dht.metric_con_incoming, 1)
+	p_con_incoming.Inc()
+
+	// TODO, maybe...
+	// p_con_incoming_rejected.Inc()
+
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 	dht.ProcessPeerStream(ctx, cancelFunc, s)
 }
@@ -343,9 +325,8 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 // WritePeerInfo - write some data from our peerstore for pid
 func (dht *DHT) WritePeerInfo(pid peer.ID) {
 	// Find out some info about the peer...
-	protocols, protoerr := dht.Peerstore.GetProtocols(pid)
-	agent, agenterr := dht.Peerstore.Get(pid, "AgentVersion")
 
+	protocols, protoerr := dht.Peerstore.GetProtocols(pid)
 	if protoerr == nil {
 		for _, proto := range protocols {
 			s := fmt.Sprintf("%s,%s", pid.Pretty(), proto)
@@ -353,6 +334,7 @@ func (dht *DHT) WritePeerInfo(pid peer.ID) {
 		}
 	}
 
+	agent, agenterr := dht.Peerstore.Get(pid, "AgentVersion")
 	if agenterr == nil {
 		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
 		dht.sessionMgr.log_peer_agents.WriteData(s)
@@ -363,5 +345,4 @@ func (dht *DHT) WritePeerInfo(pid peer.ID) {
 		s := fmt.Sprintf("%s,%s,%d,%x", pid.Pretty(), decoded.Name, decoded.Length, decoded.Digest)
 		dht.sessionMgr.log_peer_ids.WriteData(s)
 	}
-
 }

@@ -42,6 +42,9 @@ var (
 		Name: "dht_written_put_value", Help: ""})
 	p_written_get_value = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_written_get_value", Help: ""})
+
+	p_peers_found = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_peers_found", Help: ""})
 )
 
 type DHTSessionMgr struct {
@@ -218,6 +221,7 @@ func (mgr *DHTSessionMgr) NotifyPutValue(localPeerID string, peerID string, key 
 }
 
 func (mgr *DHTSessionMgr) NotifyCloserPeers(localPeerID string, peerID string, pid peer.ID, addr multiaddr.Multiaddr) {
+	p_peers_found.Inc()
 
 	mgr.nodeDetails.AddAddr(pid, addr)
 

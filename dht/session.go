@@ -26,7 +26,6 @@ import (
 type DHTSession struct {
 	mgr                *DHTSessionMgr
 	stream             network.Stream
-	isIncoming         bool
 	readChannel        chan pb.Message // Channel for incoming messages
 	context            context.Context
 	sid                string
@@ -47,7 +46,6 @@ func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream) *D
 		mgr:               mgr,
 		ctime:             time.Now(),
 		stream:            s,
-		isIncoming:        s.Stat().Direction == network.DirInbound,
 		readChannel:       make(chan pb.Message, 1),
 		context:           ctx,
 		sid:               uuid.NewString(),
@@ -171,7 +169,7 @@ func (ses *DHTSession) Handle() {
 		}
 	}()
 
-	if !ses.isIncoming {
+	if ses.stream.Stat().Direction == network.DirOutbound {
 		// Do a FIND_NODE
 		key := make([]byte, 16)
 		rand.Read(key)
@@ -207,7 +205,6 @@ func (ses *DHTSession) Handle() {
 							for _, a := range cpeer.Addrs {
 								ad, err := multiaddr.NewMultiaddrBytes(a)
 								if err == nil && isConnectable(ad) {
-
 									ses.mgr.NotifyCloserPeers(localPeerID, peerID, pid, ad)
 								}
 							}
@@ -287,6 +284,18 @@ func (ses *DHTSession) Handle() {
 				if err == nil {
 					ses.mgr.NotifyGetProviders(localPeerID, peerID, cid)
 				}
+
+				msg := pb.Message{
+					Type:          pb.Message_GET_PROVIDERS,
+					Key:           req.Key,
+					ProviderPeers: make([]pb.Message_Peer, 0),
+				}
+				err = ses.Write(msg)
+				if err != nil {
+					return
+				}
+
+				ses.Log(fmt.Sprintf("writer sent get_providers_reply"))
 			}
 		}
 	}
