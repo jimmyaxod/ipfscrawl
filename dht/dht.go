@@ -64,27 +64,6 @@ var (
 		Name: "dht_con_incoming", Help: ""})
 	p_con_incoming_rejected = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_con_incoming_rejected", Help: ""})
-	p_written_ping = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_written_ping", Help: ""})
-	p_written_ping_reply = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_written_ping_reply", Help: ""})
-	p_written_find_node = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_written_find_node", Help: ""})
-	p_written_find_node_reply = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_written_find_node_reply", Help: ""})
-
-	p_read_put_value = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_read_put_value", Help: ""})
-	p_read_get_value = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_read_get_value", Help: ""})
-	p_read_add_provider = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_read_add_provider", Help: ""})
-	p_read_get_provider = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_read_get_provider", Help: ""})
-	p_read_find_node = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_read_find_node", Help: ""})
-	p_read_ping = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_read_ping", Help: ""})
 	p_peers_found = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "dht_peers_found", Help: ""})
 
@@ -138,18 +117,6 @@ func (dht *DHT) UpdateStats() {
 	p_con_incoming.Set(float64(dht.metric_con_incoming))
 	p_con_incoming_rejected.Set(float64(dht.metric_con_incoming_rejected))
 
-	p_written_ping.Set(float64(dht.metric_written_ping))
-	p_written_ping_reply.Set(float64(dht.metric_written_ping_reply))
-	p_written_find_node.Set(float64(dht.metric_written_find_node))
-	p_written_find_node_reply.Set(float64(dht.metric_written_find_node))
-
-	p_read_put_value.Set(float64(dht.metric_read_put_value))
-	p_read_get_value.Set(float64(dht.metric_read_get_value))
-	p_read_add_provider.Set(float64(dht.metric_read_add_provider))
-	p_read_get_provider.Set(float64(dht.metric_read_get_provider))
-	p_read_find_node.Set(float64(dht.metric_read_find_node))
-	p_read_ping.Set(float64(dht.metric_read_ping))
-
 	p_peers_found.Set(float64(dht.metric_peers_found))
 
 	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
@@ -177,6 +144,7 @@ func (dht *DHT) UpdateStats() {
 }
 
 type DHT struct {
+	sessionMgr  *DHTSessionMgr
 	nodedetails NodeDetails
 
 	max_sessions_in  int
@@ -189,23 +157,13 @@ type DHT struct {
 
 	started time.Time
 
-	metric_pending_connect         int64
-	metric_con_outgoing_fail       uint64
-	metric_con_outgoing_success    uint64
-	metric_con_outgoing_rejected   uint64
-	metric_con_incoming            uint64
-	metric_con_incoming_rejected   uint64
-	metric_written_ping            uint64
-	metric_written_ping_reply      uint64
-	metric_written_find_node       uint64
-	metric_written_find_node_reply uint64
-	metric_read_put_value          uint64
-	metric_read_get_value          uint64
-	metric_read_add_provider       uint64
-	metric_read_get_provider       uint64
-	metric_read_find_node          uint64
-	metric_read_ping               uint64
-	metric_peers_found             uint64
+	metric_pending_connect       int64
+	metric_con_outgoing_fail     uint64
+	metric_con_outgoing_success  uint64
+	metric_con_outgoing_rejected uint64
+	metric_con_incoming          uint64
+	metric_con_incoming_rejected uint64
+	metric_peers_found           uint64
 
 	metric_active_sessions_in  int64
 	metric_active_sessions_out int64
@@ -229,6 +187,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
+		sessionMgr:         NewDHTSessionMgr(),
 		nodedetails:        *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
 		max_sessions_in:    MAX_SESSIONS_IN,
 		max_sessions_out:   MAX_SESSIONS_OUT,
@@ -344,13 +303,6 @@ func (dht *DHT) ShowStats() {
 		dht.metric_con_outgoing_rejected,
 		dht.metric_con_incoming,
 		dht.metric_con_incoming_rejected)
-	fmt.Printf("Total Writes ping=%d find_node=%d\n", dht.metric_written_ping, dht.metric_written_find_node)
-
-	// Stats on incoming messages
-	fmt.Printf("Reads put=%d get=%d addprov=%d getprov=%d find_node=%d ping=%d\n",
-		dht.metric_read_put_value, dht.metric_read_get_value,
-		dht.metric_read_add_provider, dht.metric_read_get_provider,
-		dht.metric_read_find_node, dht.metric_read_ping)
 
 	fmt.Printf(dht.nodedetails.Stats())
 
@@ -493,7 +445,6 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 			return
 		}
 
-		atomic.AddUint64(&dht.metric_written_find_node, 1)
 		ses.Log(fmt.Sprintf("writer sent find_node"))
 
 		select {
@@ -552,7 +503,6 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 			switch req.GetType() {
 			case pb.Message_PUT_VALUE:
 				ses.Log(fmt.Sprintf("reader put_value"))
-				atomic.AddUint64(&dht.metric_read_put_value, 1)
 
 				rec := req.GetRecord()
 
@@ -601,7 +551,6 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 
 			case pb.Message_GET_VALUE:
 				ses.Log(fmt.Sprintf("reader get_value"))
-				atomic.AddUint64(&dht.metric_read_get_value, 1)
 
 				s := fmt.Sprintf("%s,%x", peerID, req.GetKey())
 				dht.log_get.WriteData(s)
@@ -617,7 +566,6 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 				}
 			case pb.Message_ADD_PROVIDER:
 				ses.Log(fmt.Sprintf("reader add_provider"))
-				atomic.AddUint64(&dht.metric_read_add_provider, 1)
 
 				pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
 
@@ -634,7 +582,6 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 				}
 			case pb.Message_GET_PROVIDERS:
 				ses.Log(fmt.Sprintf("reader get_provider"))
-				atomic.AddUint64(&dht.metric_read_get_provider, 1)
 
 				_, cid, err := cid.CidFromBytes(req.GetKey())
 				if err == nil {
@@ -643,7 +590,6 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 				}
 			case pb.Message_FIND_NODE:
 				ses.Log(fmt.Sprintf("reader find_node"))
-				atomic.AddUint64(&dht.metric_read_find_node, 1)
 				// Make a reply and send it...
 				msg := pb.Message{
 					Type:            pb.Message_FIND_NODE,
@@ -656,11 +602,9 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 					return
 				}
 
-				atomic.AddUint64(&dht.metric_written_find_node_reply, 1)
 				ses.Log(fmt.Sprintf("writer sent find_node_reply"))
 			case pb.Message_PING:
 				ses.Log(fmt.Sprintf("reader ping"))
-				atomic.AddUint64(&dht.metric_read_ping, 1)
 				// We need to reply to them with a ping then...
 				msg_ping := pb.Message{
 					Type:            pb.Message_PING,
@@ -671,7 +615,6 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 				if err != nil {
 					return
 				}
-				atomic.AddUint64(&dht.metric_written_ping_reply, 1)
 				ses.Log(fmt.Sprintf("writer sent ping reply"))
 			}
 		}
@@ -733,7 +676,7 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 		}
 	}(dht, isIncoming)
 
-	ses := NewDHTSession(ctx, s, isIncoming)
+	ses := NewDHTSession(ctx, dht.sessionMgr, s, isIncoming)
 
 	go dht.handleSession(ses, ctx, cancelFunc, s, isIncoming, sessionDone)
 }

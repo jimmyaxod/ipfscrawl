@@ -20,6 +20,7 @@ import (
  */
 
 type DHTSession struct {
+	mgr                *DHTSessionMgr
 	stream             network.Stream
 	ReadChannel        chan pb.Message // Channel for incoming messages
 	context            context.Context
@@ -36,8 +37,9 @@ type DHTSession struct {
 }
 
 // Create a new DHTSession
-func NewDHTSession(ctx context.Context, s network.Stream, isIncoming bool) DHTSession {
+func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream, isIncoming bool) DHTSession {
 	session := DHTSession{
+		mgr:               mgr,
 		ctime:             time.Now(),
 		stream:            s,
 		ReadChannel:       make(chan pb.Message, 1),
@@ -74,7 +76,7 @@ func NewDHTSession(ctx context.Context, s network.Stream, isIncoming bool) DHTSe
 }
 
 // Close this session do any tidying up etc
-func (ses DHTSession) Close() {
+func (ses *DHTSession) Close() {
 	if !ses.SAVE_SESSION_LOGS {
 		return
 	}
@@ -83,7 +85,7 @@ func (ses DHTSession) Close() {
 }
 
 // Log something for this session
-func (ses DHTSession) Log(msg string) {
+func (ses *DHTSession) Log(msg string) {
 	if !ses.SAVE_SESSION_LOGS {
 		return
 	}
@@ -93,7 +95,7 @@ func (ses DHTSession) Log(msg string) {
 }
 
 // Write a message to the other peer
-func (ses DHTSession) Write(msg pb.Message) error {
+func (ses *DHTSession) Write(msg pb.Message) error {
 	if ses.LOG_DATA_OUT {
 		jsonBytes, _ := json.Marshal(msg)
 		ses.Log(fmt.Sprintf(" -> %s", string(jsonBytes)))
@@ -106,12 +108,13 @@ func (ses DHTSession) Write(msg pb.Message) error {
 	if err != nil {
 		return err
 	}
+	ses.mgr.RegisterWritten(msg)
 	ses.total_messages_out++
 	return nil
 }
 
 // Read messages and put them on the readChannel
-func (ses DHTSession) readMessages() {
+func (ses *DHTSession) readMessages() {
 	r := msgio.NewVarintReaderSize(ses.stream, network.MessageSizeMax)
 
 	for {
@@ -137,6 +140,7 @@ func (ses DHTSession) readMessages() {
 			close(ses.ReadChannel)
 			return
 		}
+		ses.mgr.RegisterRead(req)
 		ses.total_messages_in++
 		if ses.LOG_DATA_IN {
 			jsonBytes, _ := json.Marshal(req)
