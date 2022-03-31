@@ -5,14 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
-
-	outputdata "github.com/jimmyaxod/ipfscrawl/data"
-
-	"github.com/ipfs/go-cid"
 
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -24,10 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	mh "github.com/multiformats/go-multihash"
-
-	ipnspb "github.com/ipfs/go-ipns/pb"
 )
 
 /**
@@ -167,46 +159,20 @@ type DHT struct {
 
 	metric_active_sessions_in  int64
 	metric_active_sessions_out int64
-
-	log_peerinfo       outputdata.Outputdata
-	log_addproviders   outputdata.Outputdata
-	log_getproviders   outputdata.Outputdata
-	log_put            outputdata.Outputdata
-	log_get            outputdata.Outputdata
-	log_put_ipns       outputdata.Outputdata
-	log_get_ipns       outputdata.Outputdata
-	log_put_pk         outputdata.Outputdata
-	log_peer_protocols outputdata.Outputdata
-	log_peer_agents    outputdata.Outputdata
-	log_peer_ids       outputdata.Outputdata
-	log_stats          outputdata.Outputdata
 }
 
 // NewDHT creates a new DHT on top of the given hosts
 func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
-	output_file_period := int64(60 * 60)
-
 	dht := &DHT{
-		sessionMgr:         NewDHTSessionMgr(),
-		nodedetails:        *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
-		max_sessions_in:    MAX_SESSIONS_IN,
-		max_sessions_out:   MAX_SESSIONS_OUT,
-		hosts:              hosts,
-		Peerstore:          peerstore,
-		started:            time.Now(),
-		log_peerinfo:       outputdata.NewOutputdata("peerinfo", output_file_period),
-		log_peer_protocols: outputdata.NewOutputdata("peerprotocols", output_file_period),
-		log_peer_agents:    outputdata.NewOutputdata("peeragents", output_file_period),
-		log_peer_ids:       outputdata.NewOutputdata("peerids", output_file_period),
-		log_addproviders:   outputdata.NewOutputdata("addproviders", output_file_period),
-		log_getproviders:   outputdata.NewOutputdata("getproviders", output_file_period),
-		log_put:            outputdata.NewOutputdata("put", output_file_period),
-		log_get:            outputdata.NewOutputdata("get", output_file_period),
-		log_put_ipns:       outputdata.NewOutputdata("put_ipns", output_file_period),
-		log_get_ipns:       outputdata.NewOutputdata("get_ipns", output_file_period),
-		log_put_pk:         outputdata.NewOutputdata("put_pk", output_file_period),
-		log_stats:          outputdata.NewOutputdataSimple("stats", output_file_period),
+		nodedetails:      *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
+		max_sessions_in:  MAX_SESSIONS_IN,
+		max_sessions_out: MAX_SESSIONS_OUT,
+		hosts:            hosts,
+		Peerstore:        peerstore,
+		started:          time.Now(),
 	}
+
+	dht.sessionMgr = NewDHTSessionMgr(&dht.nodedetails)
 
 	// Set it up to handle incoming streams of the correct protocol
 	for _, host := range hosts {
@@ -306,28 +272,7 @@ func (dht *DHT) ShowStats() {
 
 	fmt.Printf(dht.nodedetails.Stats())
 
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	fmt.Printf("Memory Alloc = %v MiB", m.Alloc/(1024*1024))
-	fmt.Printf(" TotalAlloc = %v MiB", m.TotalAlloc/(1024*1024))
-	fmt.Printf(" Sys = %v MiB", m.Sys/(1024*1024))
-	fmt.Printf(" NumGC = %v\n", m.NumGC)
-
 	fmt.Println()
-
-	total_nodes, total_ready, total_expired, total_connected, avg_since := dht.nodedetails.GetStats()
-
-	// Also write it to a stats file...
-	// NumGC, Allo, Sys,
-	s := fmt.Sprintf("%v,%v,%v, %d,%d,%d,%d,%d,%d, %d,%d,%d,%d,%.2f",
-		m.NumGC, m.Alloc/(1024*1024), m.Sys/(1024*1024),
-		total_connections, total_streams, total_dht_streams,
-		total_in_dht_streams, total_out_dht_streams, total_peerstore,
-		total_nodes, total_ready, total_expired, total_connected, avg_since,
-	)
-
-	dht.log_stats.WriteData(s)
 
 }
 
@@ -406,221 +351,6 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	dht.ProcessPeerStream(ctx, cancelFunc, s, true)
 }
 
-// handleSession handles a new RPC...
-func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc context.CancelFunc, s network.Stream, isIncoming bool, sessionDone func()) {
-	defer sessionDone()
-
-	peerID := s.Conn().RemotePeer().Pretty()
-	localPeerID := s.Conn().LocalPeer().Pretty()
-	ses.Log(fmt.Sprintf("Start %s -> %s", localPeerID, peerID))
-
-	// cancel context, and drain the read channel so it's not blocked and can exit thread etc
-	defer func() {
-		s.Close()
-		s.Conn().Close()
-
-		cancelFunc()
-
-		for {
-			_, ok := <-ses.ReadChannel
-			if !ok {
-				break
-			}
-		}
-	}()
-
-	defer dht.nodedetails.Disconnected(peerID)
-
-	if !isIncoming {
-		// Do a FIND_NODE
-		key := make([]byte, 16)
-		rand.Read(key)
-
-		msg := pb.Message{
-			Type: pb.Message_FIND_NODE,
-			Key:  key,
-		}
-		err := ses.Write(msg)
-		if err != nil {
-			return
-		}
-
-		ses.Log(fmt.Sprintf("writer sent find_node"))
-
-		select {
-		case <-ctx.Done():
-			return
-		case req, ok := <-ses.ReadChannel:
-			if !ok {
-				// Error on read, let's close things up...
-				return
-			}
-
-			if req.GetType() == pb.Message_FIND_NODE {
-				if len(req.CloserPeers) > 0 {
-					ses.Log(fmt.Sprintf("reader CloserPeers %d", len(req.CloserPeers)))
-					// Check out the FIND_NODE on that!
-					for _, cpeer := range req.CloserPeers {
-
-						pid, err := peer.IDFromBytes([]byte(cpeer.Id))
-						if err == nil {
-							for _, a := range cpeer.Addrs {
-								ad, err := multiaddr.NewMultiaddrBytes(a)
-								if err == nil && isConnectable(ad) {
-
-									dht.Peerstore.AddAddr(pid, ad, 1*time.Hour)
-
-									// localPeerID, fromPeerID, newPeerID, addr
-									s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
-									dht.log_peerinfo.WriteData(s)
-								}
-							}
-
-							atomic.AddUint64(&dht.metric_peers_found, 1)
-
-							// Add it to our node details
-							dht.nodedetails.Add(pid.Pretty())
-						}
-					}
-				}
-
-			} else {
-				ses.Log(fmt.Sprintf("Unexpected message"))
-			}
-		}
-
-	} else {
-		// Incoming request
-		select {
-		case <-ctx.Done():
-			return
-		case req, ok := <-ses.ReadChannel:
-			if !ok {
-				// Error on read, let's close things up...
-				return
-			}
-
-			switch req.GetType() {
-			case pb.Message_PUT_VALUE:
-				ses.Log(fmt.Sprintf("reader put_value"))
-
-				rec := req.GetRecord()
-
-				s := fmt.Sprintf("%s,%x,%x,%x,%s", peerID, req.GetKey(), rec.Key, rec.Value, rec.TimeReceived)
-				dht.log_put.WriteData(s)
-
-				// TODO: /pk/ - maps Hash(pubkey) to pubkey
-
-				if strings.HasPrefix(string(rec.Key), "/pk/") {
-					// Extract the PID...
-					pidbytes := rec.Key[4:]
-					pid, err := peer.IDFromBytes(pidbytes)
-					if err == nil {
-						s := fmt.Sprintf("%s,%s,%x", peerID, pid.Pretty(), rec.Value)
-						dht.log_put_pk.WriteData(s)
-					}
-				}
-
-				// If it's ipns...
-				if strings.HasPrefix(string(rec.Key), "/ipns/") {
-					// Extract the PID...
-					pidbytes := rec.Key[6:]
-					pid, err := peer.IDFromBytes(pidbytes)
-					if err == nil {
-						// ok so it's an ipns record, so lets examine the data...
-						ipns_rec := ipnspb.IpnsEntry{}
-						err = ipns_rec.Unmarshal(rec.Value)
-						if err == nil {
-							// Log everything...
-							//pubkey := ipns_rec.GetPubKey()
-							//validity := ipns_rec.GetValidity()
-							//signature := ipns_rec.GetSignature()
-
-							ttl := ipns_rec.GetTtl()
-							seq := ipns_rec.GetSequence()
-							value := ipns_rec.GetValue()
-
-							s := fmt.Sprintf("%s,%s,%s,%d,%d", peerID, pid.Pretty(), string(value), ttl, seq)
-							dht.log_put_ipns.WriteData(s)
-
-						} else {
-							fmt.Printf("Error unmarshalling ipns %v\n", err)
-						}
-					}
-				}
-
-			case pb.Message_GET_VALUE:
-				ses.Log(fmt.Sprintf("reader get_value"))
-
-				s := fmt.Sprintf("%s,%x", peerID, req.GetKey())
-				dht.log_get.WriteData(s)
-
-				if strings.HasPrefix(string(req.GetKey()), "/ipns/") {
-					// Extract the PID...
-					pidbytes := req.GetKey()[6:]
-					pid, err := peer.IDFromBytes(pidbytes)
-					if err == nil {
-						s := fmt.Sprintf("%s,%s", peerID, pid.Pretty())
-						dht.log_get_ipns.WriteData(s)
-					}
-				}
-			case pb.Message_ADD_PROVIDER:
-				ses.Log(fmt.Sprintf("reader add_provider"))
-
-				pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
-
-				_, cid, err := cid.CidFromBytes(req.GetKey())
-				if err == nil {
-
-					// Log all providers...
-					for _, pi := range pinfos {
-						for _, a := range pi.Addrs {
-							s := fmt.Sprintf("%s,%s,%s,%s", peerID, cid, pi.ID, a)
-							dht.log_addproviders.WriteData(s)
-						}
-					}
-				}
-			case pb.Message_GET_PROVIDERS:
-				ses.Log(fmt.Sprintf("reader get_provider"))
-
-				_, cid, err := cid.CidFromBytes(req.GetKey())
-				if err == nil {
-					s := fmt.Sprintf("%s,%s", peerID, cid)
-					dht.log_getproviders.WriteData(s)
-				}
-			case pb.Message_FIND_NODE:
-				ses.Log(fmt.Sprintf("reader find_node"))
-				// Make a reply and send it...
-				msg := pb.Message{
-					Type:            pb.Message_FIND_NODE,
-					Key:             req.Key,
-					CloserPeers:     make([]pb.Message_Peer, 0),
-					ClusterLevelRaw: req.ClusterLevelRaw,
-				}
-				err := ses.Write(msg)
-				if err != nil {
-					return
-				}
-
-				ses.Log(fmt.Sprintf("writer sent find_node_reply"))
-			case pb.Message_PING:
-				ses.Log(fmt.Sprintf("reader ping"))
-				// We need to reply to them with a ping then...
-				msg_ping := pb.Message{
-					Type:            pb.Message_PING,
-					ClusterLevelRaw: req.ClusterLevelRaw,
-				}
-
-				err := ses.Write(msg_ping)
-				if err != nil {
-					return
-				}
-				ses.Log(fmt.Sprintf("writer sent ping reply"))
-			}
-		}
-	}
-}
-
 // Filter out some common unconnectable addresses...
 func isConnectable(a multiaddr.Multiaddr) bool {
 
@@ -666,19 +396,20 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 		atomic.AddInt64(&dht.metric_active_sessions_out, 1)
 	}
 
-	sessionDone := func(d *DHT, isIn bool) func() {
+	ses := NewDHTSession(ctx, dht.sessionMgr, s, isIncoming)
+
+	go func(d *DHT, isIn bool) func() {
 		return func() {
+			ses.Handle()
+
 			if isIn {
 				atomic.AddInt64(&d.metric_active_sessions_in, -1)
 			} else {
 				atomic.AddInt64(&d.metric_active_sessions_out, -1)
 			}
 		}
+
 	}(dht, isIncoming)
-
-	ses := NewDHTSession(ctx, dht.sessionMgr, s, isIncoming)
-
-	go dht.handleSession(ses, ctx, cancelFunc, s, isIncoming, sessionDone)
 }
 
 // WritePeerInfo - write some data from our peerstore for pid
@@ -690,13 +421,13 @@ func (dht *DHT) WritePeerInfo(pid peer.ID) {
 	if protoerr == nil {
 		for _, proto := range protocols {
 			s := fmt.Sprintf("%s,%s", pid.Pretty(), proto)
-			dht.log_peer_protocols.WriteData(s)
+			dht.sessionMgr.log_peer_protocols.WriteData(s)
 		}
 	}
 
 	if agenterr == nil {
 		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
-		dht.log_peer_agents.WriteData(s)
+		dht.sessionMgr.log_peer_agents.WriteData(s)
 
 		ag := fmt.Sprintf("%s", agent)
 		ag_top := strings.Split(ag, "/")[0]
@@ -708,7 +439,7 @@ func (dht *DHT) WritePeerInfo(pid peer.ID) {
 	decoded, err := mh.Decode([]byte(pid))
 	if err == nil {
 		s := fmt.Sprintf("%s,%s,%d,%x", pid.Pretty(), decoded.Name, decoded.Length, decoded.Digest)
-		dht.log_peer_ids.WriteData(s)
+		dht.sessionMgr.log_peer_ids.WriteData(s)
 	}
 
 }

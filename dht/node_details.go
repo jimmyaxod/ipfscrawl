@@ -8,6 +8,7 @@ import (
 
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
+	"github.com/multiformats/go-multiaddr"
 )
 
 const (
@@ -85,6 +86,11 @@ func (nd *NodeDetails) Stats() string {
 		total_ready,
 		total_expired,
 		avg_since)
+}
+
+func (nd *NodeDetails) AddAddr(id peer.ID, addr multiaddr.Multiaddr) {
+	nd.Add(id.Pretty())
+	nd.peerstore.AddAddr(id, addr, 1*time.Hour)
 }
 
 // Add adds a node if it doesn't already exist.
