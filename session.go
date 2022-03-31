@@ -14,6 +14,11 @@ import (
 	"github.com/libp2p/go-msgio"
 )
 
+/**
+ * Represents a dht session between peers
+ * Can optionally log all messages to session logs
+ */
+
 type DHTSession struct {
 	stream             network.Stream
 	ReadChannel        chan pb.Message // Channel for incoming messages
@@ -73,7 +78,7 @@ func (ses DHTSession) Close() {
 	if !ses.SAVE_SESSION_LOGS {
 		return
 	}
-	ses.Log(fmt.Sprintf("Total messages read %d", ses.total_messages_in))
+	ses.Log(fmt.Sprintf("Total messages read %d written %d", ses.total_messages_in, ses.total_messages_out))
 	ses.logfile.Close()
 }
 
@@ -87,17 +92,17 @@ func (ses DHTSession) Log(msg string) {
 	ses.logfw.Flush()
 }
 
-// Write a message
+// Write a message to the other peer
 func (ses DHTSession) Write(msg pb.Message) error {
 	if ses.LOG_DATA_OUT {
 		jsonBytes, _ := json.Marshal(msg)
 		ses.Log(fmt.Sprintf(" -> %s", string(jsonBytes)))
 	}
-	data_ping, err := msg.Marshal()
+	data, err := msg.Marshal()
 	if err != nil {
 		return err
 	}
-	err = ses.writer.WriteMsg(data_ping)
+	err = ses.writer.WriteMsg(data)
 	if err != nil {
 		return err
 	}

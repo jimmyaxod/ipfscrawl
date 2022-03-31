@@ -236,19 +236,22 @@ func (nd *NodeDetails) Get() string {
 	defer nd.mutex.Unlock()
 
 	// TODO: Could optimize this better...
-	n := len(nd.allIDs)
-	if n > 0 {
-		i := rand.Intn(len(nd.allIDs))
-		// Check if it's good...
+	toExpire := make([]string, 0)
 
-		id := nd.allIDs[i]
+	// Expire some...
+	defer func() {
+		for _, id := range toExpire {
+			nd.remove(id)
+		}
+	}()
+
+	for _, id := range nd.allIDs {
 		if readyForConnect(nd.nodes[id]) {
 			nd.nodes[id].lastConnectionAttemptTime = time.Now()
 			return id
 		}
-
 		if shouldExpire(nd.nodes[id]) {
-			nd.remove(id)
+			toExpire = append(toExpire, id)
 		}
 	}
 

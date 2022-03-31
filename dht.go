@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,10 +44,7 @@ const (
 const CONNECTION_MAX_TIME = 5 * time.Minute
 
 const MAX_SESSIONS_IN = 1200
-const TARGET_SESSIONS_IN = 1024
-
 const MAX_SESSIONS_OUT = 1200
-const TARGET_SESSIONS_OUT = 1024
 
 const MAX_NODE_DETAILS = 10000
 
@@ -181,14 +177,11 @@ func (dht *DHT) UpdateStats() {
 type DHT struct {
 	nodedetails NodeDetails
 
-	target_sessions_in  int
-	max_sessions_in     int
-	target_sessions_out int
-	max_sessions_out    int
+	max_sessions_in  int
+	max_sessions_out int
 
 	target_peerstore int
 
-	hostmu    sync.Mutex
 	peerstore peerstore.Peerstore
 	hosts     []host.Host
 
@@ -234,25 +227,29 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	output_file_period := int64(60 * 60)
 
 	dht := &DHT{
-		nodedetails:         *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
-		target_sessions_in:  TARGET_SESSIONS_IN,
-		max_sessions_in:     MAX_SESSIONS_IN,
-		target_sessions_out: TARGET_SESSIONS_OUT,
-		max_sessions_out:    MAX_SESSIONS_OUT,
-		hosts:               make([]host.Host, 0),
-		started:             time.Now(),
-		log_peerinfo:        NewOutputdata("peerinfo", output_file_period),
-		log_peer_protocols:  NewOutputdata("peerprotocols", output_file_period),
-		log_peer_agents:     NewOutputdata("peeragents", output_file_period),
-		log_peer_ids:        NewOutputdata("peerids", output_file_period),
-		log_addproviders:    NewOutputdata("addproviders", output_file_period),
-		log_getproviders:    NewOutputdata("getproviders", output_file_period),
-		log_put:             NewOutputdata("put", output_file_period),
-		log_get:             NewOutputdata("get", output_file_period),
-		log_put_ipns:        NewOutputdata("put_ipns", output_file_period),
-		log_get_ipns:        NewOutputdata("get_ipns", output_file_period),
-		log_put_pk:          NewOutputdata("put_pk", output_file_period),
-		log_stats:           NewOutputdataSimple("stats", output_file_period),
+		nodedetails:        *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
+		max_sessions_in:    MAX_SESSIONS_IN,
+		max_sessions_out:   MAX_SESSIONS_OUT,
+		hosts:              hosts,
+		peerstore:          peerstore,
+		started:            time.Now(),
+		log_peerinfo:       NewOutputdata("peerinfo", output_file_period),
+		log_peer_protocols: NewOutputdata("peerprotocols", output_file_period),
+		log_peer_agents:    NewOutputdata("peeragents", output_file_period),
+		log_peer_ids:       NewOutputdata("peerids", output_file_period),
+		log_addproviders:   NewOutputdata("addproviders", output_file_period),
+		log_getproviders:   NewOutputdata("getproviders", output_file_period),
+		log_put:            NewOutputdata("put", output_file_period),
+		log_get:            NewOutputdata("get", output_file_period),
+		log_put_ipns:       NewOutputdata("put_ipns", output_file_period),
+		log_get_ipns:       NewOutputdata("get_ipns", output_file_period),
+		log_put_pk:         NewOutputdata("put_pk", output_file_period),
+		log_stats:          NewOutputdataSimple("stats", output_file_period),
+	}
+
+	// Set it up to handle incoming streams of the correct protocol
+	for _, host := range hosts {
+		host.SetStreamHandler(proto, dht.handleNewStream)
 	}
 
 	// Start something to try keep us alive, and to trim empty connections
@@ -262,13 +259,12 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 
 			total_dht_streams += int(atomic.LoadInt64(&dht.metric_pending_connect))
 
-			if total_dht_streams < dht.target_sessions_out {
+			if total_dht_streams < dht.max_sessions_out {
 				// Find something to connect to
 				p := dht.nodedetails.Get()
 				if p != "" {
 					targetID, err := peer.Decode(p)
 					if err == nil {
-						//fmt.Printf("Would try connect to %v\n", targetID)
 						go dht.Connect(targetID)
 					}
 				} else {
@@ -276,45 +272,16 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 					time.Sleep(50 * time.Millisecond)
 				}
 			} else {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 			}
 		}
 	}()
 
-	dht.SetHosts(peerstore, hosts)
-
 	return dht
-}
-
-func (dht *DHT) SetHosts(peerstore peerstore.Peerstore, hosts []host.Host) {
-	dht.hostmu.Lock()
-	defer dht.hostmu.Unlock()
-
-	// If we have existing hosts, close them all
-	go func(oldhosts []host.Host) {
-		fmt.Printf("Closing hosts [%d]\n", len(oldhosts))
-		for i, host := range oldhosts {
-			fmt.Printf("Closing host %d\n", i)
-			host.Close()
-		}
-	}(dht.hosts)
-
-	fmt.Printf("Setting up new hosts and peerstore\n")
-	// Setup hosts + peerstore
-	dht.peerstore = peerstore
-	dht.hosts = hosts
-
-	// Set it up to handle incoming streams of the correct protocol
-	for _, host := range hosts {
-		host.SetStreamHandler(proto, dht.handleNewStream)
-	}
 }
 
 // CurrentStreams - get number of current streams
 func (dht *DHT) CurrentStreams() (int, int, int, int, int, int) {
-	dht.hostmu.Lock()
-	defer dht.hostmu.Unlock()
-
 	total_connections := 0
 	total_streams := 0
 	total_dht_streams := 0
@@ -354,10 +321,8 @@ func (dht *DHT) CurrentStreams() (int, int, int, int, int, int) {
 // ShowStats - print out some stats about our crawl
 func (dht *DHT) ShowStats() {
 	// How many connections do we have?, how many streams?
-	dht.hostmu.Lock()
 	total_peerstore := dht.peerstore.Peers().Len()
 	num_hosts := len(dht.hosts)
-	dht.hostmu.Unlock()
 
 	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
 
@@ -426,22 +391,17 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_out))
 
-	//_, _, total_dht_streams, _, _ := dht.CurrentStreams()
-	if total_dht_streams >= dht.target_sessions_out {
-		if total_dht_streams >= dht.max_sessions_out {
-			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
-			return errors.New("No capacity")
-		}
-		if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
-			atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
-			return errors.New("Dupe")
-		}
+	if total_dht_streams >= dht.max_sessions_out {
+		atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
+		return errors.New("No capacity")
+	}
+	if !dht.nodedetails.ReadyForConnect(id.Pretty()) {
+		atomic.AddUint64(&dht.metric_con_outgoing_rejected, 1)
+		return errors.New("Dupe")
 	}
 
 	// Pick a host at random...
-	dht.hostmu.Lock()
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
-	dht.hostmu.Unlock()
 
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 
@@ -469,21 +429,18 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	// If we have enough connections, check if we should reject it
 	total_dht_streams := int(atomic.LoadInt64(&dht.metric_active_sessions_in))
 
-	//_, _, total_dht_streams, _, _ := dht.CurrentStreams()
-	if total_dht_streams >= dht.target_sessions_in {
-		if total_dht_streams >= dht.max_sessions_in {
-			atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
-			s.Close()
-			s.Conn().Close()
-			return
-		}
+	if total_dht_streams >= dht.max_sessions_in {
+		atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
+		s.Close()
+		s.Conn().Close()
+		return
+	}
 
-		if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
-			atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
-			s.Close()
-			s.Conn().Close()
-			return
-		}
+	if !dht.nodedetails.ReadyForConnect(pid.Pretty()) {
+		atomic.AddUint64(&dht.metric_con_incoming_rejected, 1)
+		s.Close()
+		s.Conn().Close()
+		return
 	}
 
 	// Handle it...
@@ -558,9 +515,7 @@ func (dht *DHT) handleSession(ses DHTSession, ctx context.Context, cancelFunc co
 								ad, err := multiaddr.NewMultiaddrBytes(a)
 								if err == nil && isConnectable(ad) {
 
-									dht.hostmu.Lock()
 									dht.peerstore.AddAddr(pid, ad, 1*time.Hour)
-									dht.hostmu.Unlock()
 
 									// localPeerID, fromPeerID, newPeerID, addr
 									s := fmt.Sprintf("%s,%s,%s,%s", localPeerID, peerID, pid, ad)
@@ -783,11 +738,9 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 
 // WritePeerInfo - write some data from our peerstore for pid
 func (dht *DHT) WritePeerInfo(pid peer.ID) {
-	dht.hostmu.Lock()
 	// Find out some info about the peer...
 	protocols, protoerr := dht.peerstore.GetProtocols(pid)
 	agent, agenterr := dht.peerstore.Get(pid, "AgentVersion")
-	dht.hostmu.Unlock()
 
 	if protoerr == nil {
 		for _, proto := range protocols {

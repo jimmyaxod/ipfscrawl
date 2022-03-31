@@ -21,7 +21,6 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
-	"github.com/libp2p/go-tcp-transport"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -85,25 +84,12 @@ func main() {
 	fmt.Printf("Going into stats loop...\n")
 
 	ticker_stats := time.NewTicker(10 * time.Second)
-	//	ticker_nuke_host := time.NewTicker(10 * time.Minute)
 
 	for {
 		select {
 		case <-ticker_stats.C:
 			dhtc.ShowStats()
 			dhtc.UpdateStats()
-			/*
-				case <-ticker_nuke_host.C:
-					// Create a new peerstore and new hosts, and replace it all...
-					hosts := make([]host.Host, *NUM_HOSTS)
-					peerstore, _ := pstoremem.NewPeerstore()
-
-					for i := 0; i < len(hosts); i++ {
-						hosts[i] = createHost(ctx, peerstore)
-					}
-
-					dhtc.SetHosts(peerstore, hosts)
-			*/
 		}
 	}
 
@@ -147,9 +133,9 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 			//			libp2p.Security(libp2ptls.ID, libp2ptls.New),
 			//			libp2p.Security(noise.ID, noise.New),
 			libp2p.Peerstore(peerstore),
-			libp2p.Transport(tcp.NewTCPTransport, tcp.WithConnectionTimeout(10*time.Second)),
-			//			libp2p.DefaultTransports,
-			libp2p.UserAgent("ipfscrawl"),
+			//libp2p.Transport(tcp.NewTCPTransport, tcp.WithConnectionTimeout(10*time.Second)),
+			libp2p.DefaultTransports,
+			libp2p.UserAgent("speeder0.01"),
 			//			libp2p.ConnectionManager(connman),
 		)
 
