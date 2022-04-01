@@ -64,35 +64,29 @@ type DHTSessionMgr struct {
 	metric_read_put_value     uint64
 	metric_read_get_value     uint64
 
-	log_peerinfo       outputdata.Outputdata
-	log_addproviders   outputdata.Outputdata
-	log_getproviders   outputdata.Outputdata
-	log_put            outputdata.Outputdata
-	log_get            outputdata.Outputdata
-	log_put_ipns       outputdata.Outputdata
-	log_get_ipns       outputdata.Outputdata
-	log_put_pk         outputdata.Outputdata
-	log_peer_protocols outputdata.Outputdata
-	log_peer_agents    outputdata.Outputdata
-	log_peer_ids       outputdata.Outputdata
+	log_peerinfo     outputdata.Outputdata
+	log_addproviders outputdata.Outputdata
+	log_getproviders outputdata.Outputdata
+	log_put          outputdata.Outputdata
+	log_get          outputdata.Outputdata
+	log_put_ipns     outputdata.Outputdata
+	log_get_ipns     outputdata.Outputdata
+	log_put_pk       outputdata.Outputdata
 }
 
 func NewDHTSessionMgr(nd *NodeDetails) *DHTSessionMgr {
 	output_file_period := int64(60 * 60)
 
 	return &DHTSessionMgr{
-		nodeDetails:        nd,
-		log_peerinfo:       outputdata.NewOutputdata("peerinfo", output_file_period),
-		log_peer_protocols: outputdata.NewOutputdata("peerprotocols", output_file_period),
-		log_peer_agents:    outputdata.NewOutputdata("peeragents", output_file_period),
-		log_peer_ids:       outputdata.NewOutputdata("peerids", output_file_period),
-		log_addproviders:   outputdata.NewOutputdata("addproviders", output_file_period),
-		log_getproviders:   outputdata.NewOutputdata("getproviders", output_file_period),
-		log_put:            outputdata.NewOutputdata("put", output_file_period),
-		log_get:            outputdata.NewOutputdata("get", output_file_period),
-		log_put_ipns:       outputdata.NewOutputdata("put_ipns", output_file_period),
-		log_get_ipns:       outputdata.NewOutputdata("get_ipns", output_file_period),
-		log_put_pk:         outputdata.NewOutputdata("put_pk", output_file_period),
+		nodeDetails:      nd,
+		log_peerinfo:     outputdata.NewOutputdata("peerinfo", output_file_period),
+		log_addproviders: outputdata.NewOutputdata("addproviders", output_file_period),
+		log_getproviders: outputdata.NewOutputdata("getproviders", output_file_period),
+		log_put:          outputdata.NewOutputdata("put", output_file_period),
+		log_get:          outputdata.NewOutputdata("get", output_file_period),
+		log_put_ipns:     outputdata.NewOutputdata("put_ipns", output_file_period),
+		log_get_ipns:     outputdata.NewOutputdata("get_ipns", output_file_period),
+		log_put_pk:       outputdata.NewOutputdata("put_pk", output_file_period),
 	}
 }
 

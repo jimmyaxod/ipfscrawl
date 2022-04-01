@@ -6,9 +6,11 @@ import (
 	"sync"
 	"time"
 
+	outputdata "github.com/jimmyaxod/ipfscrawl/data"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/multiformats/go-multiaddr"
+	mh "github.com/multiformats/go-multihash"
 )
 
 const (
@@ -34,11 +36,21 @@ type NodeDetails struct {
 	nodes     map[string]*NodeInfo
 	mutex     sync.Mutex
 	peerstore peerstore.Peerstore
+
+	log_peer_protocols outputdata.Outputdata
+	log_peer_agents    outputdata.Outputdata
+	log_peer_ids       outputdata.Outputdata
 }
 
 // NewNodeDetails makes a new NodeDetails
 func NewNodeDetails(maxSize int, peerstore peerstore.Peerstore) *NodeDetails {
-	nd := &NodeDetails{}
+	output_file_period := int64(60 * 60)
+
+	nd := &NodeDetails{
+		log_peer_protocols: outputdata.NewOutputdata("peerprotocols", output_file_period),
+		log_peer_agents:    outputdata.NewOutputdata("peeragents", output_file_period),
+		log_peer_ids:       outputdata.NewOutputdata("peerids", output_file_period),
+	}
 	nd.nodes = make(map[string]*NodeInfo)
 	nd.maxSize = maxSize
 	nd.peerstore = peerstore
@@ -258,5 +270,30 @@ func (nd *NodeDetails) Get() peer.ID {
 		nd.mutex.Unlock()
 		// Let something else have a turn...
 		nd.mutex.Lock()
+	}
+}
+
+// WritePeerInfo - write some data from our peerstore for pid
+func (nd *NodeDetails) WritePeerInfo(pid peer.ID) {
+	// Find out some info about the peer...
+
+	protocols, protoerr := nd.peerstore.GetProtocols(pid)
+	if protoerr == nil {
+		for _, proto := range protocols {
+			s := fmt.Sprintf("%s,%s", pid.Pretty(), proto)
+			nd.log_peer_protocols.WriteData(s)
+		}
+	}
+
+	agent, agenterr := nd.peerstore.Get(pid, "AgentVersion")
+	if agenterr == nil {
+		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
+		nd.log_peer_agents.WriteData(s)
+	}
+
+	decoded, err := mh.Decode([]byte(pid))
+	if err == nil {
+		s := fmt.Sprintf("%s,%s,%d,%x", pid.Pretty(), decoded.Name, decoded.Length, decoded.Digest)
+		nd.log_peer_ids.WriteData(s)
 	}
 }

@@ -18,8 +18,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-
-	mh "github.com/multiformats/go-multihash"
 )
 
 /**
@@ -238,20 +236,55 @@ func (dht *DHT) Connect(id peer.ID) error {
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
 
-	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+	ctx, _ := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 
 	s, err := host.NewStream(ctx, id, proto)
 	if err != nil {
 		p_con_outgoing_fail.Inc()
 		dht.nodedetails.ConnectFailure(id.Pretty())
-		cancelFunc()
 		return err
 	}
 
 	p_con_outgoing_success.Inc()
 	dht.nodedetails.Connected(id.Pretty())
 	dht.nodedetails.ConnectSuccess(id.Pretty())
-	dht.ProcessPeerStream(ctx, cancelFunc, s)
+
+	pid := s.Conn().RemotePeer()
+
+	dht.nodedetails.WritePeerInfo(pid)
+
+	ses := NewDHTSession(ctx, dht.sessionMgr, s)
+	go func() {
+		msg := ses.MakeRandomFindNode()
+		resp, err := ses.SendMsg(msg)
+		if err == nil {
+			if resp.GetType() == pb.Message_FIND_NODE {
+				peerID := ses.stream.Conn().RemotePeer().Pretty()
+				localPeerID := ses.stream.Conn().LocalPeer().Pretty()
+
+				if len(resp.CloserPeers) > 0 {
+					ses.Log(fmt.Sprintf("reader CloserPeers %d", len(resp.CloserPeers)))
+					// Check out the FIND_NODE on that!
+					for _, cpeer := range resp.CloserPeers {
+
+						pid, err := peer.IDFromBytes([]byte(cpeer.Id))
+						if err == nil {
+							for _, a := range cpeer.Addrs {
+								ad, err := multiaddr.NewMultiaddrBytes(a)
+								if err == nil && isConnectable(ad) {
+									ses.mgr.NotifyCloserPeers(localPeerID, peerID, pid, ad)
+								}
+							}
+						}
+					}
+				}
+			} else {
+				ses.Log(fmt.Sprintf("Unexpected message"))
+			}
+		}
+		dht.nodedetails.Disconnected(pid.Pretty())
+	}()
+
 	return nil
 }
 
@@ -269,8 +302,15 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	// TODO, maybe...
 	// p_con_incoming_rejected.Inc()
 
-	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
-	dht.ProcessPeerStream(ctx, cancelFunc, s)
+	ctx, _ := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+
+	dht.nodedetails.WritePeerInfo(pid)
+
+	ses := NewDHTSession(ctx, dht.sessionMgr, s)
+	go func() {
+		ses.Handle()
+		dht.nodedetails.Disconnected(pid.Pretty())
+	}()
 }
 
 // Filter out some common unconnectable addresses...
@@ -304,72 +344,4 @@ func isConnectable(a multiaddr.Multiaddr) bool {
 		return false
 	}
 	return true
-}
-
-// Process a peer stream
-func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.CancelFunc, s network.Stream) {
-	pid := s.Conn().RemotePeer()
-
-	dht.WritePeerInfo(pid)
-
-	ses := NewDHTSession(ctx, dht.sessionMgr, s)
-	go func() {
-		if s.Stat().Direction == network.DirInbound {
-			ses.Handle()
-		} else {
-			msg := ses.MakeRandomFindNode()
-			resp, err := ses.SendMsg(msg)
-			if err == nil {
-				if resp.GetType() == pb.Message_FIND_NODE {
-					peerID := ses.stream.Conn().RemotePeer().Pretty()
-					localPeerID := ses.stream.Conn().LocalPeer().Pretty()
-
-					if len(resp.CloserPeers) > 0 {
-						ses.Log(fmt.Sprintf("reader CloserPeers %d", len(resp.CloserPeers)))
-						// Check out the FIND_NODE on that!
-						for _, cpeer := range resp.CloserPeers {
-
-							pid, err := peer.IDFromBytes([]byte(cpeer.Id))
-							if err == nil {
-								for _, a := range cpeer.Addrs {
-									ad, err := multiaddr.NewMultiaddrBytes(a)
-									if err == nil && isConnectable(ad) {
-										ses.mgr.NotifyCloserPeers(localPeerID, peerID, pid, ad)
-									}
-								}
-							}
-						}
-					}
-				} else {
-					ses.Log(fmt.Sprintf("Unexpected message"))
-				}
-			}
-		}
-		dht.nodedetails.Disconnected(pid.Pretty())
-	}()
-}
-
-// WritePeerInfo - write some data from our peerstore for pid
-func (dht *DHT) WritePeerInfo(pid peer.ID) {
-	// Find out some info about the peer...
-
-	protocols, protoerr := dht.Peerstore.GetProtocols(pid)
-	if protoerr == nil {
-		for _, proto := range protocols {
-			s := fmt.Sprintf("%s,%s", pid.Pretty(), proto)
-			dht.sessionMgr.log_peer_protocols.WriteData(s)
-		}
-	}
-
-	agent, agenterr := dht.Peerstore.Get(pid, "AgentVersion")
-	if agenterr == nil {
-		s := fmt.Sprintf("%s,%s", pid.Pretty(), agent)
-		dht.sessionMgr.log_peer_agents.WriteData(s)
-	}
-
-	decoded, err := mh.Decode([]byte(pid))
-	if err == nil {
-		s := fmt.Sprintf("%s,%s,%d,%x", pid.Pretty(), decoded.Name, decoded.Length, decoded.Digest)
-		dht.sessionMgr.log_peer_ids.WriteData(s)
-	}
 }
