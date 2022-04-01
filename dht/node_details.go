@@ -11,12 +11,30 @@ import (
 	"github.com/libp2p/go-libp2p-core/peerstore"
 	"github.com/multiformats/go-multiaddr"
 	mh "github.com/multiformats/go-multihash"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const (
 	MaxNumConnectFailures       = 15
 	DelayConnectAttemptDuration = 2 * time.Minute
 	DelayReconnectDuration      = 10 * time.Minute
+)
+
+var (
+	p_nd_total_nodes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_nodes", Help: ""})
+	p_nd_total_ready = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_ready", Help: ""})
+	p_nd_total_expired = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_expired", Help: ""})
+	p_nd_total_connected = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_total_connected", Help: ""})
+	p_nd_avg_since = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_avg_since", Help: ""})
+
+	p_nd_peerstore_size = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "dht_nd_peerstore_size", Help: ""})
 )
 
 // NodeInfo contains details about a specific node on the network
@@ -85,19 +103,15 @@ func (nd *NodeDetails) GetStats() (int, int, int, int, float64) {
 
 	avg_since := total_sinceconnect.Seconds() / float64(total_nodes)
 
+	// Update prometheus metrics
+	p_nd_total_nodes.Set(float64(total_nodes))
+	p_nd_total_ready.Set(float64(total_ready))
+	p_nd_total_expired.Set(float64(total_expired))
+	p_nd_total_connected.Set(float64(total_connected))
+	p_nd_avg_since.Set(float64(avg_since))
+	p_nd_peerstore_size.Set(float64(nd.peerstore.Peers().Len()))
+
 	return total_nodes, total_ready, total_expired, total_connected, avg_since
-}
-
-// Stats gets some interesting stats
-func (nd *NodeDetails) Stats() string {
-	total_nodes, total_ready, total_expired, total_connected, avg_since := nd.GetStats()
-
-	return fmt.Sprintf("NodeDetails nodes=%d connected=%d ready=%d expired=%d avg_since=%.0f seconds\n",
-		total_nodes,
-		total_connected,
-		total_ready,
-		total_expired,
-		avg_since)
 }
 
 func (nd *NodeDetails) AddAddr(id peer.ID, addr multiaddr.Multiaddr) {

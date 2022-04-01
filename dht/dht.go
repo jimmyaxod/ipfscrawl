@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p-core/host"
@@ -39,9 +38,6 @@ const PERIOD_FIND_NODE = 10 * time.Millisecond
 const MAX_NODE_DETAILS = 10000
 
 var (
-	p_pending_connects = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_pending_connects", Help: ""})
-
 	p_con_outgoing_fail = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_con_outgoing_fail", Help: ""})
 	p_con_outgoing_success = promauto.NewCounter(prometheus.CounterOpts{
@@ -51,69 +47,11 @@ var (
 		Name: "dht_con_incoming", Help: ""})
 	p_con_incoming_rejected = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_con_incoming_rejected", Help: ""})
-
-	p_ns_total_connections = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_ns_total_connections", Help: ""})
-	p_ns_total_streams = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_ns_total_streams", Help: ""})
-	p_ns_total_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_ns_total_dht_streams", Help: ""})
-	p_ns_total_in_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_ns_total_in_dht_streams", Help: ""})
-	p_ns_total_out_dht_streams = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_ns_total_out_dht_streams", Help: ""})
-	p_ns_total_empty_connections = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_ns_total_empty_connections", Help: ""})
-
-	p_nd_total_nodes = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_nd_total_nodes", Help: ""})
-	p_nd_total_ready = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_nd_total_ready", Help: ""})
-	p_nd_total_expired = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_nd_total_expired", Help: ""})
-	p_nd_total_connected = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_nd_total_connected", Help: ""})
-	p_nd_avg_since = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_nd_avg_since", Help: ""})
-
-	p_nd_peerstore_size = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "dht_nd_peerstore_size", Help: ""})
-
-	p_session_total_time = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "dht_session_total_time", Help: ""})
 )
-
-// Update prometheus stats
-func (dht *DHT) UpdateStats() {
-	fmt.Printf("Updating prom stats...\n")
-
-	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
-	p_ns_total_connections.Set(float64(total_connections))
-	p_ns_total_streams.Set(float64(total_streams))
-	p_ns_total_dht_streams.Set(float64(total_dht_streams))
-	p_ns_total_in_dht_streams.Set(float64(total_in_dht_streams))
-	p_ns_total_out_dht_streams.Set(float64(total_out_dht_streams))
-	p_ns_total_empty_connections.Set(float64(total_empty_connections))
-
-	total_nodes, total_ready, total_expired, total_connected, avg_since := dht.nodedetails.GetStats()
-
-	p_nd_total_nodes.Set(float64(total_nodes))
-	p_nd_total_ready.Set(float64(total_ready))
-	p_nd_total_expired.Set(float64(total_expired))
-	p_nd_total_connected.Set(float64(total_connected))
-	p_nd_avg_since.Set(float64(avg_since))
-
-	p_nd_peerstore_size.Set(float64(dht.Peerstore.Peers().Len()))
-
-	p_pending_connects.Set(float64(dht.metric_pending_connect))
-}
 
 type DHT struct {
 	sessionMgr  *DHTSessionMgr
 	nodedetails NodeDetails
-
-	max_sessions_in  int
-	max_sessions_out int
 
 	target_peerstore int
 
@@ -121,8 +59,6 @@ type DHT struct {
 	hosts     []host.Host
 
 	started time.Time
-
-	metric_pending_connect int64
 }
 
 // NewDHT creates a new DHT on top of the given hosts
@@ -158,78 +94,10 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	return dht
 }
 
-// CurrentStreams - get number of current streams
-func (dht *DHT) CurrentStreams() (int, int, int, int, int, int) {
-	total_connections := 0
-	total_streams := 0
-	total_dht_streams := 0
-
-	total_in_dht_streams := 0
-	total_out_dht_streams := 0
-
-	total_empty_connections := 0
-
-	for _, host := range dht.hosts {
-		cons := host.Network().Conns()
-
-		total_connections += len(cons)
-		for _, con := range cons {
-			total_streams += len(con.GetStreams())
-			if len(con.GetStreams()) == 0 {
-				con.Close()
-				total_empty_connections++
-			} else {
-				for _, stream := range con.GetStreams() {
-					if stream.Protocol() == proto {
-						total_dht_streams++
-						stats := stream.Stat()
-						if stats.Direction == network.DirInbound {
-							total_in_dht_streams++
-						} else {
-							total_out_dht_streams++
-						}
-					}
-				}
-			}
-		}
-	}
-	return total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections
-}
-
-// ShowStats - print out some stats about our crawl
-func (dht *DHT) ShowStats() {
-	// How many connections do we have?, how many streams?
-	total_peerstore := dht.Peerstore.Peers().Len()
-	num_hosts := len(dht.hosts)
-
-	total_connections, total_streams, total_dht_streams, total_in_dht_streams, total_out_dht_streams, total_empty_connections := dht.CurrentStreams()
-
-	fmt.Printf("DHT uptime=%.2fs\n", time.Since(dht.started).Seconds())
-	fmt.Printf("Current hosts=%d cons=%d streams=%d dht_streams=%d (%d in %d out) empty_cons=%d peerstore=%d\n",
-		num_hosts,
-		total_connections,
-		total_streams,
-		total_dht_streams,
-		total_in_dht_streams,
-		total_out_dht_streams,
-		total_empty_connections,
-		total_peerstore)
-
-	fmt.Printf(dht.nodedetails.Stats())
-
-	fmt.Println()
-
-}
-
 // Connect connects to a new peer, and starts an eventloop for it
 // Assumes that tryConnectTo has already been called...
 func (dht *DHT) Connect(id peer.ID) error {
 	//	fmt.Printf("Outgoing [%s]\n", id.Pretty())
-
-	atomic.AddInt64(&dht.metric_pending_connect, 1)
-	defer func() {
-		atomic.AddInt64(&dht.metric_pending_connect, -1)
-	}()
 
 	dht.nodedetails.Add(id.Pretty())
 

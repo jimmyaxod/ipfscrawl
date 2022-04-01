@@ -90,8 +90,7 @@ func main() {
 	for {
 		select {
 		case <-ticker_stats.C:
-			dhtc.ShowStats()
-			dhtc.UpdateStats()
+			fmt.Printf("Running...\n")
 		}
 	}
 
