@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -12,10 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/network"
-	"github.com/libp2p/go-libp2p-core/peer"
 	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	"github.com/libp2p/go-msgio"
-	"github.com/multiformats/go-multiaddr"
 )
 
 /**
@@ -50,9 +49,9 @@ func NewDHTSession(ctx context.Context, mgr *DHTSessionMgr, s network.Stream) *D
 		context:           ctx,
 		sid:               uuid.NewString(),
 		total_messages_in: 0,
-		SAVE_SESSION_LOGS: true,
-		LOG_DATA_IN:       true,
-		LOG_DATA_OUT:      true,
+		SAVE_SESSION_LOGS: false,
+		LOG_DATA_IN:       false,
+		LOG_DATA_OUT:      false,
 	}
 
 	if session.SAVE_SESSION_LOGS {
@@ -149,6 +148,45 @@ func (ses *DHTSession) readMessages() {
 	}
 }
 
+// Sends a msg and waits for a response, then tidy up.
+func (ses *DHTSession) SendMsg(msg pb.Message) (pb.Message, error) {
+	peerID := ses.stream.Conn().RemotePeer().Pretty()
+	localPeerID := ses.stream.Conn().LocalPeer().Pretty()
+	ses.Log(fmt.Sprintf("SendMsg %s -> %s", localPeerID, peerID))
+
+	// cancel context, and drain the read channel so it's not blocked and can exit thread etc
+	defer func() {
+		ses.stream.Close()
+		ses.stream.Conn().Close()
+
+		for {
+			_, ok := <-ses.readChannel
+			if !ok {
+				break
+			}
+		}
+	}()
+
+	err := ses.Write(msg)
+	if err != nil {
+		return pb.Message{}, err
+	}
+
+	ses.Log(fmt.Sprintf("writer sent %s", msg.Type.String()))
+
+	select {
+	case <-ses.context.Done():
+		return pb.Message{}, errors.New("Context done")
+	case resp, ok := <-ses.readChannel:
+		if !ok {
+			// Error on read, let's close things up...
+			return pb.Message{}, errors.New("Error on read")
+		}
+		// Return the resp
+		return resp, nil
+	}
+}
+
 // handleSession handles a new RPC...
 func (ses *DHTSession) Handle() {
 
@@ -169,134 +207,97 @@ func (ses *DHTSession) Handle() {
 		}
 	}()
 
-	if ses.stream.Stat().Direction == network.DirOutbound {
-		// Do a FIND_NODE
-		key := make([]byte, 16)
-		rand.Read(key)
-
-		msg := pb.Message{
-			Type: pb.Message_FIND_NODE,
-			Key:  key,
-		}
-		err := ses.Write(msg)
-		if err != nil {
+	// Incoming request
+	select {
+	case <-ses.context.Done():
+		return
+	case req, ok := <-ses.readChannel:
+		if !ok {
+			// Error on read, let's close things up...
 			return
 		}
 
-		ses.Log(fmt.Sprintf("writer sent find_node"))
+		switch req.GetType() {
+		case pb.Message_PING:
+			ses.Log(fmt.Sprintf("reader ping"))
+			// We need to reply to them with a ping then...
+			msg_ping := pb.Message{
+				Type:            pb.Message_PING,
+				ClusterLevelRaw: req.ClusterLevelRaw,
+			}
 
-		select {
-		case <-ses.context.Done():
-			return
-		case req, ok := <-ses.readChannel:
-			if !ok {
-				// Error on read, let's close things up...
+			err := ses.Write(msg_ping)
+			if err != nil {
+				return
+			}
+			ses.Log(fmt.Sprintf("writer sent ping reply"))
+		case pb.Message_FIND_NODE:
+			ses.Log(fmt.Sprintf("reader find_node"))
+			// Make a reply and send it...
+
+			// TODO: Fill in CloserPeers...
+			msg := pb.Message{
+				Type:            pb.Message_FIND_NODE,
+				Key:             req.Key,
+				CloserPeers:     make([]pb.Message_Peer, 0),
+				ClusterLevelRaw: req.ClusterLevelRaw,
+			}
+			err := ses.Write(msg)
+			if err != nil {
 				return
 			}
 
-			if req.GetType() == pb.Message_FIND_NODE {
-				if len(req.CloserPeers) > 0 {
-					ses.Log(fmt.Sprintf("reader CloserPeers %d", len(req.CloserPeers)))
-					// Check out the FIND_NODE on that!
-					for _, cpeer := range req.CloserPeers {
+			ses.Log(fmt.Sprintf("writer sent find_node_reply"))
+		case pb.Message_PUT_VALUE:
+			ses.Log(fmt.Sprintf("reader put_value"))
+			rec := req.GetRecord()
+			ses.mgr.NotifyPutValue(localPeerID, peerID, req.GetKey(), rec)
+			// TODO: Any reply?
+		case pb.Message_GET_VALUE:
+			ses.Log(fmt.Sprintf("reader get_value"))
 
-						pid, err := peer.IDFromBytes([]byte(cpeer.Id))
-						if err == nil {
-							for _, a := range cpeer.Addrs {
-								ad, err := multiaddr.NewMultiaddrBytes(a)
-								if err == nil && isConnectable(ad) {
-									ses.mgr.NotifyCloserPeers(localPeerID, peerID, pid, ad)
-								}
-							}
-						}
-					}
-				}
-
-			} else {
-				ses.Log(fmt.Sprintf("Unexpected message"))
+			ses.mgr.NotifyGetValue(localPeerID, peerID, req.GetKey())
+			// TODO: Reply
+		case pb.Message_ADD_PROVIDER:
+			ses.Log(fmt.Sprintf("reader add_provider"))
+			pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
+			_, cid, err := cid.CidFromBytes(req.GetKey())
+			if err == nil {
+				ses.mgr.NotifyAddProvider(localPeerID, peerID, cid, pinfos)
 			}
-		}
+			// TODO: Reply?
+		case pb.Message_GET_PROVIDERS:
+			ses.Log(fmt.Sprintf("reader get_provider"))
 
-	} else {
-		// Incoming request
-		select {
-		case <-ses.context.Done():
-			return
-		case req, ok := <-ses.readChannel:
-			if !ok {
-				// Error on read, let's close things up...
+			_, cid, err := cid.CidFromBytes(req.GetKey())
+			if err == nil {
+				ses.mgr.NotifyGetProviders(localPeerID, peerID, cid)
+			}
+
+			msg := pb.Message{
+				Type:          pb.Message_GET_PROVIDERS,
+				Key:           req.Key,
+				ProviderPeers: make([]pb.Message_Peer, 0),
+			}
+			err = ses.Write(msg)
+			if err != nil {
 				return
 			}
 
-			switch req.GetType() {
-			case pb.Message_PING:
-				ses.Log(fmt.Sprintf("reader ping"))
-				// We need to reply to them with a ping then...
-				msg_ping := pb.Message{
-					Type:            pb.Message_PING,
-					ClusterLevelRaw: req.ClusterLevelRaw,
-				}
-
-				err := ses.Write(msg_ping)
-				if err != nil {
-					return
-				}
-				ses.Log(fmt.Sprintf("writer sent ping reply"))
-			case pb.Message_FIND_NODE:
-				ses.Log(fmt.Sprintf("reader find_node"))
-				// Make a reply and send it...
-
-				// TODO: Fill in CloserPeers...
-				msg := pb.Message{
-					Type:            pb.Message_FIND_NODE,
-					Key:             req.Key,
-					CloserPeers:     make([]pb.Message_Peer, 0),
-					ClusterLevelRaw: req.ClusterLevelRaw,
-				}
-				err := ses.Write(msg)
-				if err != nil {
-					return
-				}
-
-				ses.Log(fmt.Sprintf("writer sent find_node_reply"))
-			case pb.Message_PUT_VALUE:
-				ses.Log(fmt.Sprintf("reader put_value"))
-				rec := req.GetRecord()
-				ses.mgr.NotifyPutValue(localPeerID, peerID, req.GetKey(), rec)
-				// TODO: Any reply?
-			case pb.Message_GET_VALUE:
-				ses.Log(fmt.Sprintf("reader get_value"))
-
-				ses.mgr.NotifyGetValue(localPeerID, peerID, req.GetKey())
-				// TODO: Reply
-			case pb.Message_ADD_PROVIDER:
-				ses.Log(fmt.Sprintf("reader add_provider"))
-				pinfos := pb.PBPeersToPeerInfos(req.GetProviderPeers())
-				_, cid, err := cid.CidFromBytes(req.GetKey())
-				if err == nil {
-					ses.mgr.NotifyAddProvider(localPeerID, peerID, cid, pinfos)
-				}
-				// TODO: Reply?
-			case pb.Message_GET_PROVIDERS:
-				ses.Log(fmt.Sprintf("reader get_provider"))
-
-				_, cid, err := cid.CidFromBytes(req.GetKey())
-				if err == nil {
-					ses.mgr.NotifyGetProviders(localPeerID, peerID, cid)
-				}
-
-				msg := pb.Message{
-					Type:          pb.Message_GET_PROVIDERS,
-					Key:           req.Key,
-					ProviderPeers: make([]pb.Message_Peer, 0),
-				}
-				err = ses.Write(msg)
-				if err != nil {
-					return
-				}
-
-				ses.Log(fmt.Sprintf("writer sent get_providers_reply"))
-			}
+			ses.Log(fmt.Sprintf("writer sent get_providers_reply"))
 		}
 	}
+
+}
+
+func (ses *DHTSession) MakeRandomFindNode() pb.Message {
+	// Do a FIND_NODE
+	key := make([]byte, 16)
+	rand.Read(key)
+
+	msg := pb.Message{
+		Type: pb.Message_FIND_NODE,
+		Key:  key,
+	}
+	return msg
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
+	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 
 	"github.com/multiformats/go-multiaddr"
 
@@ -35,9 +36,7 @@ const (
 )
 
 const CONNECTION_MAX_TIME = 10 * time.Second
-
-const MAX_SESSIONS_IN = 1200
-const MAX_SESSIONS_OUT = 1200
+const PERIOD_FIND_NODE = 10 * time.Millisecond
 
 const MAX_NODE_DETAILS = 10000
 
@@ -131,12 +130,10 @@ type DHT struct {
 // NewDHT creates a new DHT on top of the given hosts
 func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	dht := &DHT{
-		nodedetails:      *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
-		max_sessions_in:  MAX_SESSIONS_IN,
-		max_sessions_out: MAX_SESSIONS_OUT,
-		hosts:            hosts,
-		Peerstore:        peerstore,
-		started:          time.Now(),
+		nodedetails: *NewNodeDetails(MAX_NODE_DETAILS, peerstore),
+		hosts:       hosts,
+		Peerstore:   peerstore,
+		started:     time.Now(),
 	}
 
 	dht.sessionMgr = NewDHTSessionMgr(&dht.nodedetails)
@@ -148,7 +145,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 
 	// Start something to keep us alive with outgoing find_node calls
 	go func() {
-		find_node_ticker := time.NewTicker(1 * time.Second)
+		find_node_ticker := time.NewTicker(PERIOD_FIND_NODE)
 
 		for {
 			select {
@@ -229,7 +226,7 @@ func (dht *DHT) ShowStats() {
 // Connect connects to a new peer, and starts an eventloop for it
 // Assumes that tryConnectTo has already been called...
 func (dht *DHT) Connect(id peer.ID) error {
-	fmt.Printf("Outgoing [%s]\n", id.Pretty())
+	//	fmt.Printf("Outgoing [%s]\n", id.Pretty())
 
 	atomic.AddInt64(&dht.metric_pending_connect, 1)
 	defer func() {
@@ -317,7 +314,37 @@ func (dht *DHT) ProcessPeerStream(ctx context.Context, cancelFunc context.Cancel
 
 	ses := NewDHTSession(ctx, dht.sessionMgr, s)
 	go func() {
-		ses.Handle()
+		if s.Stat().Direction == network.DirInbound {
+			ses.Handle()
+		} else {
+			msg := ses.MakeRandomFindNode()
+			resp, err := ses.SendMsg(msg)
+			if err == nil {
+				if resp.GetType() == pb.Message_FIND_NODE {
+					peerID := ses.stream.Conn().RemotePeer().Pretty()
+					localPeerID := ses.stream.Conn().LocalPeer().Pretty()
+
+					if len(resp.CloserPeers) > 0 {
+						ses.Log(fmt.Sprintf("reader CloserPeers %d", len(resp.CloserPeers)))
+						// Check out the FIND_NODE on that!
+						for _, cpeer := range resp.CloserPeers {
+
+							pid, err := peer.IDFromBytes([]byte(cpeer.Id))
+							if err == nil {
+								for _, a := range cpeer.Addrs {
+									ad, err := multiaddr.NewMultiaddrBytes(a)
+									if err == nil && isConnectable(ad) {
+										ses.mgr.NotifyCloserPeers(localPeerID, peerID, pid, ad)
+									}
+								}
+							}
+						}
+					}
+				} else {
+					ses.Log(fmt.Sprintf("Unexpected message"))
+				}
+			}
+		}
 		dht.nodedetails.Disconnected(pid.Pretty())
 	}()
 }
