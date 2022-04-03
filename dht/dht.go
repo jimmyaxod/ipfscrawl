@@ -2,6 +2,7 @@ package dht
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -29,7 +30,7 @@ import (
  */
 
 const (
-	proto = "/ipfs/kad/1.0.0"
+	protocol_dht = "/ipfs/kad/1.0.0"
 )
 
 const CONNECTION_MAX_TIME = 10 * time.Second
@@ -70,11 +71,12 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		started:     time.Now(),
 	}
 
-	dht.sessionMgr = NewDHTSessionMgr(&dht.nodedetails)
+	swapper := NewBitswapper(hosts)
+	dht.sessionMgr = NewDHTSessionMgr(dht, &dht.nodedetails, swapper)
 
 	// Set it up to handle incoming streams of the correct protocol
 	for _, host := range hosts {
-		host.SetStreamHandler(proto, dht.handleNewStream)
+		host.SetStreamHandler(protocol_dht, dht.handleNewStream)
 	}
 
 	// Start something to keep us alive with outgoing find_node calls
@@ -94,19 +96,14 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	return dht
 }
 
-// Connect connects to a new peer, and starts an eventloop for it
-// Assumes that tryConnectTo has already been called...
 func (dht *DHT) Connect(id peer.ID) error {
-	//	fmt.Printf("Outgoing [%s]\n", id.Pretty())
-
 	dht.nodedetails.Add(id.Pretty())
 
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
-
 	ctx, _ := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 
-	s, err := host.NewStream(ctx, id, proto)
+	s, err := host.NewStream(ctx, id, protocol_dht)
 	if err != nil {
 		p_con_outgoing_fail.Inc()
 		dht.nodedetails.ConnectFailure(id.Pretty())
@@ -124,30 +121,46 @@ func (dht *DHT) Connect(id peer.ID) error {
 	ses := NewDHTSession(ctx, dht.sessionMgr, s)
 	go func() {
 		msg := ses.MakeRandomFindNode()
+		ses.SendMsg(msg)
+		// Don't need to do anything about the reply
+		dht.nodedetails.Disconnected(pid.Pretty())
+	}()
+
+	return nil
+}
+
+func (dht *DHT) ConnectGetProviders(id peer.ID, key []byte) error {
+
+	// Pick a host at random...
+	host := dht.hosts[rand.Intn(len(dht.hosts))]
+	ctx, _ := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+
+	s, err := host.NewStream(ctx, id, protocol_dht)
+	if err != nil {
+		p_con_outgoing_fail.Inc()
+		return err
+	}
+
+	p_con_outgoing_success.Inc()
+
+	pid := s.Conn().RemotePeer()
+
+	ses := NewDHTSession(ctx, dht.sessionMgr, s)
+	go func() {
+		msg := pb.Message{
+			Type: pb.Message_GET_PROVIDERS,
+			Key:  key,
+		}
+
 		resp, err := ses.SendMsg(msg)
 		if err == nil {
-			if resp.GetType() == pb.Message_FIND_NODE {
-				peerID := ses.stream.Conn().RemotePeer().Pretty()
-				localPeerID := ses.stream.Conn().LocalPeer().Pretty()
+			if resp.GetType() == pb.Message_GET_PROVIDERS {
+				jsonBytes, _ := json.Marshal(resp)
 
-				if len(resp.CloserPeers) > 0 {
-					ses.Log(fmt.Sprintf("reader CloserPeers %d", len(resp.CloserPeers)))
-					// Check out the FIND_NODE on that!
-					for _, cpeer := range resp.CloserPeers {
+				fmt.Printf("IN Message from getProviders %s\n", string(jsonBytes))
 
-						pid, err := peer.IDFromBytes([]byte(cpeer.Id))
-						if err == nil {
-							for _, a := range cpeer.Addrs {
-								ad, err := multiaddr.NewMultiaddrBytes(a)
-								if err == nil && isConnectable(ad) {
-									ses.mgr.NotifyCloserPeers(localPeerID, peerID, pid, ad)
-								}
-							}
-						}
-					}
-				}
 			} else {
-				ses.Log(fmt.Sprintf("Unexpected message"))
+				ses.Log(fmt.Sprintf("Unexpected message for get_providers"))
 			}
 		}
 		dht.nodedetails.Disconnected(pid.Pretty())
