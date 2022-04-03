@@ -232,3 +232,36 @@ func (mgr *DHTSessionMgr) logPutValue(localPeerID string, peerID string, key []b
 	}
 
 }
+
+// Filter out some common unconnectable addresses...
+func isConnectable(a multiaddr.Multiaddr) bool {
+
+	// Loopbacks
+	if strings.HasPrefix(a.String(), "/ip4/127.0.0.1/") ||
+		strings.HasPrefix(a.String(), "/ip6/::1/") {
+		return false
+	}
+
+	// Internal ip4 ranges
+	if strings.HasPrefix(a.String(), "/ip4/192.168.") ||
+		strings.HasPrefix(a.String(), "/ip4/10.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.16.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.17.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.18.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.19.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.20.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.21.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.22.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.23.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.24.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.25.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.26.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.27.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.28.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.29.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.30.") ||
+		strings.HasPrefix(a.String(), "/ip4/172.31.") {
+		return false
+	}
+	return true
+}

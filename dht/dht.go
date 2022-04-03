@@ -2,19 +2,13 @@ package dht
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"math/rand"
-	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/peerstore"
-	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
-
-	"github.com/multiformats/go-multiaddr"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -129,46 +123,6 @@ func (dht *DHT) Connect(id peer.ID) error {
 	return nil
 }
 
-func (dht *DHT) ConnectGetProviders(id peer.ID, key []byte) error {
-
-	// Pick a host at random...
-	host := dht.hosts[rand.Intn(len(dht.hosts))]
-	ctx, _ := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
-
-	s, err := host.NewStream(ctx, id, protocol_dht)
-	if err != nil {
-		p_con_outgoing_fail.Inc()
-		return err
-	}
-
-	p_con_outgoing_success.Inc()
-
-	pid := s.Conn().RemotePeer()
-
-	ses := NewDHTSession(ctx, dht.sessionMgr, s)
-	go func() {
-		msg := pb.Message{
-			Type: pb.Message_GET_PROVIDERS,
-			Key:  key,
-		}
-
-		resp, err := ses.SendMsg(msg)
-		if err == nil {
-			if resp.GetType() == pb.Message_GET_PROVIDERS {
-				jsonBytes, _ := json.Marshal(resp)
-
-				fmt.Printf("IN Message from getProviders %s\n", string(jsonBytes))
-
-			} else {
-				ses.Log(fmt.Sprintf("Unexpected message for get_providers"))
-			}
-		}
-		dht.nodedetails.Disconnected(pid.Pretty())
-	}()
-
-	return nil
-}
-
 // handleNewStream handles incoming streams
 func (dht *DHT) handleNewStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
@@ -192,37 +146,4 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 		ses.Handle()
 		dht.nodedetails.Disconnected(pid.Pretty())
 	}()
-}
-
-// Filter out some common unconnectable addresses...
-func isConnectable(a multiaddr.Multiaddr) bool {
-
-	// Loopbacks
-	if strings.HasPrefix(a.String(), "/ip4/127.0.0.1/") ||
-		strings.HasPrefix(a.String(), "/ip6/::1/") {
-		return false
-	}
-
-	// Internal ip4 ranges
-	if strings.HasPrefix(a.String(), "/ip4/192.168.") ||
-		strings.HasPrefix(a.String(), "/ip4/10.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.16.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.17.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.18.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.19.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.20.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.21.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.22.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.23.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.24.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.25.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.26.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.27.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.28.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.29.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.30.") ||
-		strings.HasPrefix(a.String(), "/ip4/172.31.") {
-		return false
-	}
-	return true
 }
