@@ -9,16 +9,10 @@ import (
 	"os"
 	"time"
 
-	outputdata "github.com/jimmyaxod/ipfscrawl/data"
-
 	"github.com/google/uuid"
 	pb "github.com/ipfs/go-bitswap/message/pb"
-	blocks "github.com/ipfs/go-block-format"
-	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-msgio"
-
-	merkeldag "github.com/ipfs/go-merkledag"
 )
 
 /**
@@ -27,6 +21,7 @@ import (
  */
 
 type BitswapSession struct {
+	mgr                *BitswapSessionMgr
 	stream             network.Stream
 	readChannel        chan pb.Message // Channel for any incoming messages
 	context            context.Context
@@ -41,32 +36,22 @@ type BitswapSession struct {
 	SAVE_SESSION_LOGS bool
 	LOG_DATA_IN       bool
 	LOG_DATA_OUT      bool
-
-	log_incoming         outputdata.Outputdata
-	log_incoming_payload outputdata.Outputdata
-	log_incoming_data    outputdata.Outputdata
-	log_incoming_links   outputdata.Outputdata
 }
 
 // Create a new DHTSession
-func NewBitswapSession(ctx context.Context, s network.Stream) *BitswapSession {
-	output_file_period := int64(60 * 60)
-
+func NewBitswapSession(ctx context.Context, mgr *BitswapSessionMgr, s network.Stream) *BitswapSession {
 	session := BitswapSession{
-		ctime:                time.Now(),
-		stream:               s,
-		readChannel:          make(chan pb.Message, 1),
-		context:              ctx,
-		sid:                  uuid.NewString(),
-		total_messages_in:    0,
-		total_messages_out:   0,
-		SAVE_SESSION_LOGS:    false,
-		LOG_DATA_IN:          false,
-		LOG_DATA_OUT:         false,
-		log_incoming:         outputdata.NewOutputdata("bitswap_in", output_file_period),
-		log_incoming_payload: outputdata.NewOutputdata("bitswap_in_payload", output_file_period),
-		log_incoming_data:    outputdata.NewOutputdata("bitswap_in_data", output_file_period),
-		log_incoming_links:   outputdata.NewOutputdata("bitswap_in_links", output_file_period),
+		mgr:                mgr,
+		ctime:              time.Now(),
+		stream:             s,
+		readChannel:        make(chan pb.Message, 1),
+		context:            ctx,
+		sid:                uuid.NewString(),
+		total_messages_in:  0,
+		total_messages_out: 0,
+		SAVE_SESSION_LOGS:  false,
+		LOG_DATA_IN:        false,
+		LOG_DATA_OUT:       false,
 	}
 
 	// Create a session log if required
@@ -110,8 +95,8 @@ func (ses *BitswapSession) Log(msg string) {
 
 // Write a message to the other peer
 func (ses *BitswapSession) Write(msg pb.Message) error {
-	//localPeerID := ses.stream.Conn().LocalPeer().Pretty()
-	//peerID := ses.stream.Conn().RemotePeer().Pretty()
+	localPeerID := ses.stream.Conn().LocalPeer().Pretty()
+	peerID := ses.stream.Conn().RemotePeer().Pretty()
 
 	if ses.LOG_DATA_OUT {
 		jsonBytes, _ := json.Marshal(msg)
@@ -125,7 +110,7 @@ func (ses *BitswapSession) Write(msg pb.Message) error {
 	if err != nil {
 		return err
 	}
-	//ses.mgr.RegisterWritten(localPeerID, peerID, msg)
+	ses.mgr.RegisterWritten(localPeerID, peerID, msg)
 	ses.total_messages_out++
 	return nil
 }
@@ -135,8 +120,8 @@ func (ses *BitswapSession) readMessages() {
 	r := msgio.NewVarintReaderSize(ses.stream, network.MessageSizeMax)
 	defer close(ses.readChannel)
 
-	//localPeerID := ses.stream.Conn().LocalPeer().Pretty()
-	//peerID := ses.stream.Conn().RemotePeer().Pretty()
+	localPeerID := ses.stream.Conn().LocalPeer().Pretty()
+	peerID := ses.stream.Conn().RemotePeer().Pretty()
 
 	for {
 		// Check if the context is done...
@@ -158,7 +143,7 @@ func (ses *BitswapSession) readMessages() {
 		if err != nil {
 			return
 		}
-		//ses.mgr.RegisterRead(localPeerID, peerID, req)
+		ses.mgr.RegisterRead(localPeerID, peerID, req)
 		ses.total_messages_in++
 		if ses.LOG_DATA_IN {
 			jsonBytes, _ := json.Marshal(req)
@@ -232,57 +217,11 @@ func (ses *BitswapSession) Handle() {
 		select {
 		case <-ses.context.Done():
 			return
-		case req, ok := <-ses.readChannel:
+		case _, ok := <-ses.readChannel:
 			if !ok {
 				// Error on read, let's close things up...
 				return
 			}
-
-			numBlocks := 0
-			if req.Blocks != nil {
-				numBlocks = len(req.Blocks)
-			}
-
-			if req.Payload != nil {
-				// Log these separately
-				for _, b := range req.Payload {
-					pref, err := cid.PrefixFromBytes(b.GetPrefix())
-					if err != nil {
-						return
-					}
-
-					c, err := pref.Sum(b.GetData())
-					if err != nil {
-						return
-					}
-
-					s := fmt.Sprintf("%s,%x,%s,%d", peerID, b.GetPrefix(), c, len(b.GetData()))
-					ses.log_incoming_payload.WriteData(s)
-
-					bl := blocks.NewBlock(b.GetData())
-					// Decode it...
-					msg, err := merkeldag.DecodeProtobufBlock(bl)
-					if err != nil {
-						return
-					}
-
-					size, err := msg.Size()
-					if err != nil {
-						return
-					}
-					s = fmt.Sprintf("%s,%d", msg.Cid(), size)
-					ses.log_incoming_data.WriteData(s)
-
-					for _, l := range msg.Links() {
-						s := fmt.Sprintf("%s,%s,%d,%s", msg.Cid(), l.Name, l.Size, l.Cid)
-						ses.log_incoming_links.WriteData(s)
-					}
-				}
-			} else {
-				s := fmt.Sprintf("%s,%d,%d,%t", peerID, len(req.Wantlist.Entries), numBlocks, req.Payload == nil)
-				ses.log_incoming.WriteData(s)
-			}
-
 		}
 	}
 }
