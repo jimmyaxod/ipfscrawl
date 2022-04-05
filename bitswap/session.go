@@ -25,6 +25,7 @@ type BitswapSession struct {
 	stream             network.Stream
 	readChannel        chan pb.Message // Channel for any incoming messages
 	context            context.Context
+	cancelFunc         func()
 	sid                string
 	logfile            *os.File
 	logfw              *bufio.Writer
@@ -39,13 +40,14 @@ type BitswapSession struct {
 }
 
 // Create a new DHTSession
-func NewBitswapSession(ctx context.Context, mgr *BitswapSessionMgr, s network.Stream) *BitswapSession {
+func NewBitswapSession(ctx context.Context, cancelFunc func(), mgr *BitswapSessionMgr, s network.Stream) *BitswapSession {
 	session := BitswapSession{
 		mgr:                mgr,
 		ctime:              time.Now(),
 		stream:             s,
 		readChannel:        make(chan pb.Message, 1),
 		context:            ctx,
+		cancelFunc:         cancelFunc,
 		sid:                uuid.NewString(),
 		total_messages_in:  0,
 		total_messages_out: 0,
@@ -118,7 +120,10 @@ func (ses *BitswapSession) Write(msg pb.Message) error {
 // Read messages and put them on the readChannel
 func (ses *BitswapSession) readMessages() {
 	r := msgio.NewVarintReaderSize(ses.stream, network.MessageSizeMax)
-	defer close(ses.readChannel)
+	defer func() {
+		close(ses.readChannel)
+		ses.cancelFunc()
+	}()
 
 	localPeerID := ses.stream.Conn().LocalPeer().Pretty()
 	peerID := ses.stream.Conn().RemotePeer().Pretty()
@@ -163,6 +168,7 @@ func (ses *BitswapSession) SendMsg(msg pb.Message) (pb.Message, error) {
 	defer func() {
 		ses.stream.Close()
 		ses.stream.Conn().Close()
+		ses.cancelFunc()
 
 		for {
 			_, ok := <-ses.readChannel
@@ -203,6 +209,7 @@ func (ses *BitswapSession) Handle() {
 	defer func() {
 		ses.stream.Close()
 		ses.stream.Conn().Close()
+		ses.cancelFunc()
 
 		for {
 			_, ok := <-ses.readChannel
