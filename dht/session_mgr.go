@@ -49,7 +49,6 @@ var (
 type DHTSessionMgr struct {
 	dht         *DHT
 	nodeDetails *NodeDetails
-	swapper     *Bitswapper
 
 	log_peerinfo     outputdata.Outputdata
 	log_addproviders outputdata.Outputdata
@@ -61,12 +60,11 @@ type DHTSessionMgr struct {
 	log_put_pk       outputdata.Outputdata
 }
 
-func NewDHTSessionMgr(dht *DHT, nd *NodeDetails, sw *Bitswapper) *DHTSessionMgr {
+func NewDHTSessionMgr(dht *DHT, nd *NodeDetails) *DHTSessionMgr {
 	output_file_period := int64(60 * 60)
 
 	return &DHTSessionMgr{
 		dht:              dht,
-		swapper:          sw,
 		nodeDetails:      nd,
 		log_peerinfo:     outputdata.NewOutputdata("peerinfo", output_file_period),
 		log_addproviders: outputdata.NewOutputdata("addproviders", output_file_period),

@@ -65,8 +65,7 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 		started:     time.Now(),
 	}
 
-	swapper := NewBitswapper(hosts)
-	dht.sessionMgr = NewDHTSessionMgr(dht, &dht.nodedetails, swapper)
+	dht.sessionMgr = NewDHTSessionMgr(dht, &dht.nodedetails)
 
 	// Set it up to handle incoming streams of the correct protocol
 	for _, host := range hosts {
@@ -95,12 +94,13 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 	// Pick a host at random...
 	host := dht.hosts[rand.Intn(len(dht.hosts))]
-	ctx, _ := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 
 	s, err := host.NewStream(ctx, id, protocol_dht)
 	if err != nil {
 		p_con_outgoing_fail.Inc()
 		dht.nodedetails.ConnectFailure(id.Pretty())
+		cancelFunc()
 		return err
 	}
 
@@ -112,12 +112,13 @@ func (dht *DHT) Connect(id peer.ID) error {
 
 	dht.nodedetails.WritePeerInfo(pid)
 
-	ses := NewDHTSession(ctx, dht.sessionMgr, s)
+	ses := NewDHTSession(ctx, cancelFunc, dht.sessionMgr, s)
 	go func() {
 		msg := ses.MakeRandomFindNode()
 		ses.SendMsg(msg)
 		// Don't need to do anything about the reply
 		dht.nodedetails.Disconnected(pid.Pretty())
+		cancelFunc()
 	}()
 
 	return nil
@@ -137,13 +138,14 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	// TODO, maybe...
 	// p_con_incoming_rejected.Inc()
 
-	ctx, _ := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 
 	dht.nodedetails.WritePeerInfo(pid)
 
-	ses := NewDHTSession(ctx, dht.sessionMgr, s)
+	ses := NewDHTSession(ctx, cancelFunc, dht.sessionMgr, s)
 	go func() {
 		ses.Handle()
 		dht.nodedetails.Disconnected(pid.Pretty())
+		cancelFunc()
 	}()
 }
