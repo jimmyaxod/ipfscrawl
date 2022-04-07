@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	pb "github.com/ipfs/go-bitswap/message/pb"
+	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-msgio"
 )
@@ -19,6 +20,7 @@ import (
  * Represents a bitswap session between peers
  * Can optionally log all messages to session logs
  */
+const BITSWAP_DELAY_CLOSE_CONN = 5 * time.Minute
 
 type BitswapSession struct {
 	mgr                *BitswapSessionMgr
@@ -167,7 +169,6 @@ func (ses *BitswapSession) SendMsg(msg pb.Message) (pb.Message, error) {
 	// cancel context, and drain the read channel so it's not blocked and can exit thread etc
 	defer func() {
 		ses.stream.Close()
-		ses.stream.Conn().Close()
 		ses.cancelFunc()
 
 		for {
@@ -176,6 +177,9 @@ func (ses *BitswapSession) SendMsg(msg pb.Message) (pb.Message, error) {
 				break
 			}
 		}
+		time.Sleep(BITSWAP_DELAY_CLOSE_CONN)
+		ses.stream.Conn().Close()
+
 	}()
 
 	err := ses.Write(msg)
@@ -208,7 +212,6 @@ func (ses *BitswapSession) Handle() {
 	// cancel context, and drain the read channel so it's not blocked and can exit thread etc
 	defer func() {
 		ses.stream.Close()
-		ses.stream.Conn().Close()
 		ses.cancelFunc()
 
 		for {
@@ -217,6 +220,8 @@ func (ses *BitswapSession) Handle() {
 				break
 			}
 		}
+		time.Sleep(BITSWAP_DELAY_CLOSE_CONN)
+		ses.stream.Conn().Close()
 	}()
 
 	// Incoming request/answer/etc
@@ -231,4 +236,22 @@ func (ses *BitswapSession) Handle() {
 			}
 		}
 	}
+}
+
+// Create a new BitswapRequest for a cid
+func (ses *BitswapSession) MakeBitswapRequest(cid cid.Cid) pb.Message {
+	entries := make([]pb.Message_Wantlist_Entry, 0)
+	// Ask for a specific cid...
+	entries = append(entries, pb.Message_Wantlist_Entry{
+		Block:    pb.Cid{Cid: cid},
+		Priority: 2147483632,
+		WantType: pb.Message_Wantlist_Block,
+	})
+
+	w := pb.Message{
+		Wantlist: pb.Message_Wantlist{
+			Entries: entries,
+		},
+	}
+	return w
 }

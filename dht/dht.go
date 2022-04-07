@@ -5,6 +5,9 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/ipfs/go-cid"
+	"github.com/jimmyaxod/ipfscrawl/bitswap"
+
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
@@ -24,7 +27,8 @@ import (
  */
 
 const (
-	protocol_dht = "/ipfs/kad/1.0.0"
+	protocol_dht     = "/ipfs/kad/1.0.0"
+	protocol_bitswap = "/ipfs/bitswap/1.2.0"
 )
 
 const CONNECTION_MAX_TIME = 10 * time.Second
@@ -42,11 +46,22 @@ var (
 		Name: "dht_con_incoming", Help: ""})
 	p_con_incoming_rejected = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_con_incoming_rejected", Help: ""})
+
+	p_con_bitswap_outgoing_fail = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_bitswap_outgoing_fail", Help: ""})
+	p_con_bitswap_outgoing_success = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_bitswap_outgoing_success", Help: ""})
+
+	p_con_bitswap_incoming = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_bitswap_incoming", Help: ""})
+	p_con_bitswap_incoming_rejected = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_bitswap_incoming_rejected", Help: ""})
 )
 
 type DHT struct {
-	sessionMgr  *DHTSessionMgr
-	nodedetails NodeDetails
+	sessionMgr        *DHTSessionMgr
+	sessionMgrBitswap *bitswap.BitswapSessionMgr
+	nodedetails       NodeDetails
 
 	target_peerstore int
 
@@ -66,10 +81,16 @@ func NewDHT(peerstore peerstore.Peerstore, hosts []host.Host) *DHT {
 	}
 
 	dht.sessionMgr = NewDHTSessionMgr(dht, &dht.nodedetails)
+	dht.sessionMgrBitswap = bitswap.NewBitswapSessionMgr()
 
-	// Set it up to handle incoming streams of the correct protocol
+	// Handle incoming dht
 	for _, host := range hosts {
 		host.SetStreamHandler(protocol_dht, dht.handleNewStream)
+	}
+
+	// Handle incoming bitswap
+	for _, host := range hosts {
+		host.SetStreamHandler(protocol_bitswap, dht.handleNewBitswapStream)
 	}
 
 	// Start something to keep us alive with outgoing find_node calls
@@ -124,6 +145,32 @@ func (dht *DHT) Connect(id peer.ID) error {
 	return nil
 }
 
+func (dht *DHT) ConnectBitswap(id peer.ID, cid cid.Cid) error {
+
+	// Pick a host at random...
+	host := dht.hosts[rand.Intn(len(dht.hosts))]
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+
+	s, err := host.NewStream(ctx, id, protocol_bitswap)
+	if err != nil {
+		p_con_bitswap_outgoing_fail.Inc()
+		cancelFunc()
+		return err
+	}
+
+	p_con_bitswap_outgoing_success.Inc()
+
+	ses := bitswap.NewBitswapSession(ctx, cancelFunc, dht.sessionMgrBitswap, s)
+	go func() {
+		msg := ses.MakeBitswapRequest(cid)
+		ses.SendMsg(msg)
+		// Don't need to do anything about the reply
+		cancelFunc()
+	}()
+
+	return nil
+}
+
 // handleNewStream handles incoming streams
 func (dht *DHT) handleNewStream(s network.Stream) {
 	pid := s.Conn().RemotePeer()
@@ -146,6 +193,22 @@ func (dht *DHT) handleNewStream(s network.Stream) {
 	go func() {
 		ses.Handle()
 		dht.nodedetails.Disconnected(pid.Pretty())
+		cancelFunc()
+	}()
+}
+
+// handleNewBitswapStream handles incoming streams
+func (dht *DHT) handleNewBitswapStream(s network.Stream) {
+	p_con_bitswap_incoming.Inc()
+
+	// TODO, maybe...
+	// p_con_incoming_rejected.Inc()
+
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+
+	ses := bitswap.NewBitswapSession(ctx, cancelFunc, dht.sessionMgrBitswap, s)
+	go func() {
+		ses.Handle()
 		cancelFunc()
 	}()
 }

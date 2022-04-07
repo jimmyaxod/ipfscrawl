@@ -92,6 +92,9 @@ func (mgr *DHTSessionMgr) RegisterRead(localPeerID string, peerID string, msg pb
 		if err == nil {
 			mgr.logAddProvider(localPeerID, peerID, cid, pinfos)
 		}
+
+		// Go get
+
 	case pb.Message_GET_PROVIDERS:
 		p_read_get_providers.Inc()
 
@@ -157,8 +160,9 @@ func (mgr *DHTSessionMgr) logAddProvider(localPeerID string, peerID string, cid 
 			s := fmt.Sprintf("%s,%s,%s,%s", peerID, cid, pi.ID, a)
 			mgr.log_addproviders.WriteData(s)
 		}
+
 		// Try to do some bitswap shenanigans...
-		//		mgr.swapper.Get(pi.ID, cid)
+		mgr.dht.ConnectBitswap(pi.ID, cid)
 
 	}
 }
