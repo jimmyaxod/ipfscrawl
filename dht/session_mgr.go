@@ -1,12 +1,16 @@
 package dht
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ipfs/go-cid"
 	ipnspb "github.com/ipfs/go-ipns/pb"
 	outputdata "github.com/jimmyaxod/ipfscrawl/data"
+	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	pb "github.com/libp2p/go-libp2p-kad-dht/pb"
 	record_pb "github.com/libp2p/go-libp2p-record/pb"
@@ -14,6 +18,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+const CONNECTION_MAX_TIME = 10 * time.Second
 
 var (
 	p_read_ping = promauto.NewCounter(prometheus.CounterOpts{
@@ -44,6 +50,16 @@ var (
 
 	p_peers_found = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "dht_peers_found", Help: ""})
+
+	p_con_incoming = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_incoming", Help: ""})
+	p_con_incoming_rejected = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_incoming_rejected", Help: ""})
+
+	p_con_outgoing_fail = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_outgoing_fail", Help: ""})
+	p_con_outgoing_success = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dht_con_outgoing_success", Help: ""})
 )
 
 type DHTSessionMgr struct {
@@ -266,4 +282,64 @@ func isConnectable(a multiaddr.Multiaddr) bool {
 		return false
 	}
 	return true
+}
+
+// handleNewStreamDHT handles incoming streams
+func (mgr *DHTSessionMgr) HandleNewStream(s network.Stream) {
+	pid := s.Conn().RemotePeer()
+
+	mgr.nodeDetails.Add(pid.Pretty())
+	mgr.nodeDetails.ConnectSuccess(pid.Pretty())
+	mgr.nodeDetails.Connected(pid.Pretty())
+
+	p_con_incoming.Inc()
+
+	// TODO, maybe...
+	// p_con_incoming_rejected.Inc()
+
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+
+	mgr.nodeDetails.WritePeerInfo(pid)
+
+	ses := NewDHTSession(ctx, cancelFunc, mgr, s)
+	go func() {
+		ses.Handle()
+		mgr.nodeDetails.Disconnected(pid.Pretty())
+		cancelFunc()
+	}()
+}
+
+func (mgr *DHTSessionMgr) SendRandomFindNode(host host.Host, id peer.ID) error {
+
+	mgr.nodeDetails.Add(id.Pretty())
+
+	// Pick a host at random...
+	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
+
+	s, err := host.NewStream(ctx, id, protocol_dht)
+	if err != nil {
+		p_con_outgoing_fail.Inc()
+		mgr.nodeDetails.ConnectFailure(id.Pretty())
+		cancelFunc()
+		return err
+	}
+
+	p_con_outgoing_success.Inc()
+	mgr.nodeDetails.Connected(id.Pretty())
+	mgr.nodeDetails.ConnectSuccess(id.Pretty())
+
+	pid := s.Conn().RemotePeer()
+
+	mgr.nodeDetails.WritePeerInfo(pid)
+
+	ses := NewDHTSession(ctx, cancelFunc, mgr, s)
+	go func() {
+		msg := ses.MakeRandomFindNode()
+		ses.SendMsg(msg)
+		// Don't need to do anything about the reply
+		mgr.nodeDetails.Disconnected(pid.Pretty())
+		cancelFunc()
+	}()
+
+	return nil
 }
