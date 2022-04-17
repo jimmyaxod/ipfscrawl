@@ -67,15 +67,16 @@ func main() {
 		hosts[i] = createHost(ctx, peerstore)
 	}
 
-	// Create a dht crawler using the above hosts
-	dhtc := crawldht.NewDHT(peerstore, hosts)
-	fmt.Printf("DHT set up\n")
+	nodeDetails := *crawldht.NewNodeDetails(MAX_NODE_DETAILS, peerstore)
+	sessionMgrBitswap := bitswap.NewBitswapSessionMgr(hosts)
+	sessionMgrDHT := crawldht.NewDHTSessionMgr(hosts, sessionMgrBitswap, &nodeDetails)
 
 	if *bootstrap != "" {
 		bits := strings.Split(*bootstrap, "@")
 		id := bits[0]
 		addr := bits[1]
-		connect(dhtc, id, addr)
+		host := hosts[rand.Intn(len(hosts))]
+		connect(host, peerstore, sessionMgrDHT, id, addr)
 	}
 
 	if *useDefaultBootstrap {
@@ -84,13 +85,10 @@ func main() {
 		for _, addr := range addrs {
 			peerstore.AddAddrs(addr.ID, addr.Addrs, 12*time.Hour)
 			fmt.Printf("Bootstrap to %s\n", addr.ID.Pretty())
-			dhtc.SendRandomFindNode(addr.ID)
+			host := hosts[rand.Intn(len(hosts))]
+			sessionMgrDHT.SendRandomFindNode(host, addr.ID)
 		}
 	}
-
-	nodeDetails := *crawldht.NewNodeDetails(MAX_NODE_DETAILS, peerstore)
-	sessionMgrBitswap := bitswap.NewBitswapSessionMgr(hosts)
-	sessionMgrDHT := crawldht.NewDHTSessionMgr(hosts, sessionMgrBitswap, &nodeDetails)
 
 	fmt.Printf("Going into wait loop...\n")
 
@@ -110,15 +108,15 @@ func main() {
 }
 
 // connect to something
-func connect(dhtc *crawldht.DHT, id string, addr string) {
+func connect(host host.Host, pstore peerstore.Peerstore, mgr *crawldht.DHTSessionMgr, id string, addr string) {
 	fmt.Printf("Connecting to %s %s...\n", id, addr)
 	targetID, err := peer.Decode(id)
 	if err != nil {
 		fmt.Printf("error %v\n", err)
 	}
 	targetA, err := multiaddr.NewMultiaddr(addr)
-	dhtc.Peerstore.AddAddr(targetID, targetA, time.Hour)
-	dhtc.SendRandomFindNode(targetID)
+	pstore.AddAddr(targetID, targetA, time.Hour)
+	mgr.SendRandomFindNode(host, targetID)
 }
 
 // Create a new host...
