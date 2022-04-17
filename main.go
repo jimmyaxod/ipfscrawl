@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jimmyaxod/ipfscrawl/bitswap"
 	crawldht "github.com/jimmyaxod/ipfscrawl/dht"
 
 	"github.com/libp2p/go-libp2p"
@@ -35,6 +36,9 @@ import (
 
 // https://cloudflare-ipfs.com/ipns/12D3KooWSPahV81xHimuUKrwNnonYgVrDMs1JtqmT3B12zsY5F6f
 // https://cloudflare-ipfs.com/ipfs/QmTenMnimYgzfX96qdu1kHka1S68v9PxXi8pgHd29tJywT
+
+const PERIOD_FIND_NODE = 200 * time.Millisecond
+const MAX_NODE_DETAILS = 10000
 
 const PROMETHEUS_PORT = 2112
 
@@ -84,16 +88,25 @@ func main() {
 		}
 	}
 
+	nodeDetails := *crawldht.NewNodeDetails(MAX_NODE_DETAILS, peerstore)
+	sessionMgrBitswap := bitswap.NewBitswapSessionMgr(hosts)
+	sessionMgrDHT := crawldht.NewDHTSessionMgr(hosts, sessionMgrBitswap, &nodeDetails)
+
 	fmt.Printf("Going into wait loop...\n")
 
-	ticker_stats := time.NewTicker(1 * time.Minute)
+	// Start something to keep us alive with outgoing find_node calls
+	find_node_ticker := time.NewTicker(PERIOD_FIND_NODE)
 
 	for {
 		select {
-		case <-ticker_stats.C:
-			fmt.Printf("Running...\n")
+		case <-find_node_ticker.C:
+			// Find something to connect to
+			targetID := nodeDetails.Get()
+			host := hosts[rand.Intn(len(hosts))]
+			go sessionMgrDHT.SendRandomFindNode(host, targetID)
 		}
 	}
+
 }
 
 // connect to something

@@ -8,6 +8,7 @@ import (
 
 	"github.com/ipfs/go-cid"
 	ipnspb "github.com/ipfs/go-ipns/pb"
+	"github.com/jimmyaxod/ipfscrawl/bitswap"
 	outputdata "github.com/jimmyaxod/ipfscrawl/data"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -20,6 +21,10 @@ import (
 )
 
 const CONNECTION_MAX_TIME = 10 * time.Second
+
+const (
+	protocol_dht = "/ipfs/kad/1.0.0"
+)
 
 var (
 	p_read_ping = promauto.NewCounter(prometheus.CounterOpts{
@@ -63,7 +68,7 @@ var (
 )
 
 type DHTSessionMgr struct {
-	dht         *DHT
+	bs_mgr      *bitswap.BitswapSessionMgr
 	nodeDetails *NodeDetails
 
 	log_peerinfo     outputdata.Outputdata
@@ -76,11 +81,11 @@ type DHTSessionMgr struct {
 	log_put_pk       outputdata.Outputdata
 }
 
-func NewDHTSessionMgr(dht *DHT, nd *NodeDetails) *DHTSessionMgr {
+func NewDHTSessionMgr(hosts []host.Host, bs_mgr *bitswap.BitswapSessionMgr, nd *NodeDetails) *DHTSessionMgr {
 	output_file_period := int64(60 * 60)
 
-	return &DHTSessionMgr{
-		dht:              dht,
+	mgr := &DHTSessionMgr{
+		bs_mgr:           bs_mgr,
 		nodeDetails:      nd,
 		log_peerinfo:     outputdata.NewOutputdata("peerinfo", output_file_period),
 		log_addproviders: outputdata.NewOutputdata("addproviders", output_file_period),
@@ -91,6 +96,13 @@ func NewDHTSessionMgr(dht *DHT, nd *NodeDetails) *DHTSessionMgr {
 		log_get_ipns:     outputdata.NewOutputdata("get_ipns", output_file_period),
 		log_put_pk:       outputdata.NewOutputdata("put_pk", output_file_period),
 	}
+
+	// Handle incoming dht protocols
+	for _, host := range hosts {
+		host.SetStreamHandler(protocol_dht, mgr.HandleNewStream)
+	}
+
+	return mgr
 }
 
 // Register a read happened
@@ -178,7 +190,7 @@ func (mgr *DHTSessionMgr) logAddProvider(localPeerID string, peerID string, cid 
 		}
 
 		// Try to do some bitswap shenanigans...
-		mgr.dht.SendBitswapRequest(pi.ID, cid)
+		mgr.bs_mgr.SendBitswapRequest(pi.ID, cid)
 
 	}
 }

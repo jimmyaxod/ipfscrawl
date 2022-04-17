@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"time"
 
 	pb "github.com/ipfs/go-bitswap/message/pb"
@@ -44,6 +45,7 @@ var (
 )
 
 type BitswapSessionMgr struct {
+	hosts                []host.Host
 	log_outgoing         outputdata.Outputdata
 	log_incoming         outputdata.Outputdata
 	log_incoming_payload outputdata.Outputdata
@@ -55,6 +57,7 @@ func NewBitswapSessionMgr(hosts []host.Host) *BitswapSessionMgr {
 	output_file_period := int64(60 * 60)
 
 	mgr := &BitswapSessionMgr{
+		hosts:                hosts,
 		log_outgoing:         outputdata.NewOutputdata("bitswap_out", output_file_period),
 		log_incoming:         outputdata.NewOutputdata("bitswap_in", output_file_period),
 		log_incoming_payload: outputdata.NewOutputdata("bitswap_in_payload", output_file_period),
@@ -164,7 +167,8 @@ func (mgr *BitswapSessionMgr) HandleNewStream(s network.Stream) {
  *
  *
  */
-func (mgr *BitswapSessionMgr) SendBitswapRequest(host host.Host, id peer.ID, cid cid.Cid) error {
+func (mgr *BitswapSessionMgr) SendBitswapRequest(id peer.ID, cid cid.Cid) error {
+	host := mgr.hosts[rand.Intn(len(mgr.hosts))]
 	ctx, cancelFunc := context.WithTimeout(context.TODO(), CONNECTION_MAX_TIME)
 
 	s, err := host.NewStream(ctx, id, PROTOCOL_BITSWAP)
