@@ -3,6 +3,7 @@ module github.com/jimmyaxod/ipfscrawl
 go 1.15
 
 require (
+	github.com/gocql/gocql v1.0.0 // indirect
 	github.com/google/uuid v1.3.0
 	github.com/ipfs/go-bitswap v0.6.0
 	github.com/ipfs/go-block-format v0.0.3 // indirect

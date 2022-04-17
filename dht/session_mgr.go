@@ -162,7 +162,7 @@ func (mgr *DHTSessionMgr) logAddProvider(localPeerID string, peerID string, cid 
 		}
 
 		// Try to do some bitswap shenanigans...
-		mgr.dht.ConnectBitswap(pi.ID, cid)
+		mgr.dht.SendBitswapRequest(pi.ID, cid)
 
 	}
 }

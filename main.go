@@ -1,7 +1,7 @@
 package main
 
 /**
- * Simple DHT crawler
+ * Simple ipfs DHT crawler
  *
  */
 
@@ -44,9 +44,9 @@ func main() {
 	NUM_HOSTS := flag.Int("hosts", 12, "Number of hosts to have running")
 	flag.Parse()
 
+	fmt.Printf("Setting up prometheus /metrics\n")
 	http.Handle("/metrics", promhttp.Handler())
 	go http.ListenAndServe(fmt.Sprintf(":%d", PROMETHEUS_PORT), nil)
-
 	fmt.Printf("Listening on port %d...\n", PROMETHEUS_PORT)
 
 	// So we can see pprof info
@@ -54,6 +54,7 @@ func main() {
 
 	ctx := context.TODO()
 
+	fmt.Printf("Setting up %d hosts\n", *NUM_HOSTS)
 	hosts := make([]host.Host, *NUM_HOSTS)
 
 	peerstore, _ := pstoremem.NewPeerstore()
@@ -64,6 +65,7 @@ func main() {
 
 	// Create a dht crawler using the above hosts
 	dhtc := crawldht.NewDHT(peerstore, hosts)
+	fmt.Printf("DHT set up\n")
 
 	if *bootstrap != "" {
 		bits := strings.Split(*bootstrap, "@")
@@ -76,17 +78,15 @@ func main() {
 		addrs := dht.GetDefaultBootstrapPeerAddrInfos()
 		// Put them in the peerstores...
 		for _, addr := range addrs {
-			for _, a := range addr.Addrs {
-				fmt.Printf("Bootstrap %s %s\n", addr.ID, a)
-			}
 			peerstore.AddAddrs(addr.ID, addr.Addrs, 12*time.Hour)
-			dhtc.Connect(addr.ID)
+			fmt.Printf("Bootstrap to %s\n", addr.ID.Pretty())
+			dhtc.SendRandomFindNode(addr.ID)
 		}
 	}
 
-	fmt.Printf("Going into stats loop...\n")
+	fmt.Printf("Going into wait loop...\n")
 
-	ticker_stats := time.NewTicker(10 * time.Second)
+	ticker_stats := time.NewTicker(1 * time.Minute)
 
 	for {
 		select {
@@ -94,7 +94,6 @@ func main() {
 			fmt.Printf("Running...\n")
 		}
 	}
-
 }
 
 // connect to something
@@ -106,7 +105,7 @@ func connect(dhtc *crawldht.DHT, id string, addr string) {
 	}
 	targetA, err := multiaddr.NewMultiaddr(addr)
 	dhtc.Peerstore.AddAddr(targetID, targetA, time.Hour)
-	dhtc.Connect(targetID)
+	dhtc.SendRandomFindNode(targetID)
 }
 
 // Create a new host...
@@ -132,13 +131,13 @@ func createHost(ctx context.Context, peerstore peerstore.Peerstore) host.Host {
 				fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic", port), // a UDP endpoint for the QUIC transport
 				fmt.Sprintf("/ip6/::/udp/%d/quic", port),      // a UDP endpoint for the QUIC transport
 			),
-			//			libp2p.Security(libp2ptls.ID, libp2ptls.New),
-			//			libp2p.Security(noise.ID, noise.New),
 			libp2p.Peerstore(peerstore),
 			libp2p.Transport(tcp.NewTCPTransport, tcp.WithConnectionTimeout(10*time.Second)),
-			//libp2p.DefaultTransports,
 			libp2p.UserAgent("speeder0.01"),
-			//			libp2p.ConnectionManager(connman),
+			// libp2p.Security(libp2ptls.ID, libp2ptls.New),
+			// libp2p.Security(noise.ID, noise.New),
+			// libp2p.DefaultTransports,
+			// libp2p.ConnectionManager(connman),
 		)
 
 		ping.NewPingService(myhost)
